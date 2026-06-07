@@ -1,0 +1,28 @@
+[package]
+name = "budget-app-services"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Use-case orchestration. Wires domain operations together (month lifecycle, rolling Other, funds, income, Plaid sync). Depends only on domain."
+
+[lints]
+workspace = true
+
+[dependencies]
+budget-domain = { path = "../budget-domain" }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+rust_decimal = { workspace = true }
+tracing = { workspace = true }
+
+# No direct tokio dep: app-services is pure orchestration. Async syntax is in
+# std; the runtime is provided by the binary in the (frontend-phase) server
+# crate. This keeps app-services WASM-compatible for Dioxus server functions
+# (D1: server functions -> services -> repositories).
+async-trait = { workspace = true }

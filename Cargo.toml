@@ -1,0 +1,84 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/budget-domain",
+    "crates/budget-entities",
+    "crates/budget-mappers",
+    "crates/budget-infrastructure",
+    "crates/budget-app-services",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+# Shared dependency versions. Crates opt in via `dep = { workspace = true }`.
+# Mirrors the Agora-rs port layout (DOMAIN-1, ENTITIES-13, MAPPER-1): one
+# domain crate (no ORM/framework deps), one SeaORM entities crate, a mappers
+# crate sitting between domain + entities, an infrastructure crate with the
+# concrete adapters, and an app-services crate for use-case orchestration.
+[workspace.dependencies]
+# Shared core
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Async runtime (server-side only — the domain crate must NOT depend on this).
+tokio = { version = "1.40", features = ["full"] }
+
+# Dyn-compatible async traits. Native `async fn in trait` works for static
+# dispatch, but trait objects (`Box<dyn FooRepository>`) need the desugaring
+# `async_trait` provides. Repo traits declared in budget-domain carry
+# `#[async_trait]`; impls in budget-infrastructure carry the same macro.
+async-trait = "0.1"
+
+# Time + IDs
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.10", features = ["v4", "serde"] }
+
+# Short-ID generation (10-char Base62), mirroring the Agora DOMAIN-9 pattern.
+nanoid = "0.4"
+
+# Precision-preserving Postgres NUMERIC representation. This is the backing
+# type for the project Money newtype (BUDGET-MONEY-1 / DOMAIN-8 /
+# ARCH-EXACT-DECIMALS-1): floats are forbidden for any monetary value.
+# `rust_decimal` is also a transitive dep of `sea-orm`; pinning it here makes
+# the domain crate's dependency explicit and keeps the version unified.
+rust_decimal = { version = "1.36", features = ["serde-with-str"] }
+
+# Logging / telemetry
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Persistence: SeaORM 1.x. The entities crate uses macros-only; the
+# infrastructure crate adds the runtime + driver features.
+sea-orm = { version = "1.1" }
+
+# Workspace-wide lints. Each crate inherits via `[lints] workspace = true`.
+# The workspace forbids unsafe; clippy is run pedantic + -D unwrap_used
+# -D expect_used in CI (.github/workflows/ci.yml). Here they are set to `deny`
+# so a local `cargo clippy` also fails on them (BUDGET-MONEY-1 spirit:
+# correctness invariants are mechanical, not advisory).
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "warn"
+unimplemented = "warn"
+
+# Release profile: optimized for the prod container image.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+# Dev profile: prioritize compile speed.
+[profile.dev]
+debug = "limited"
+incremental = true

@@ -1,0 +1,28 @@
+[package]
+name = "budget-domain"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Pure business logic for the budget tracker. No framework, no async runtime, no ORM, no DB (DOMAIN-1, hexagonal)."
+
+[lints]
+workspace = true
+
+# Hexagonal core. This crate must NOT import frameworks, async runtimes
+# (tokio), ORMs (sea-orm runtime), or HTTP clients. It compiles cleanly to
+# WASM with no feature flags. The Money newtype (BUDGET-MONEY-1) and all
+# domain invariants live here.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+rust_decimal = { workspace = true }
+nanoid = { workspace = true }
+
+# Dyn-compatible async repository traits (declared here, implemented in
+# budget-infrastructure). This is the only async surface in the domain crate
+# and pulls in no runtime.
+async-trait = { workspace = true }

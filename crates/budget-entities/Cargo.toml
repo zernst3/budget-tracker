@@ -1,0 +1,22 @@
+[package]
+name = "budget-entities"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "SeaORM persistence Model types — one module per Postgres table (ENTITIES-13). Pure data shape; no business logic, no DTOs."
+
+[lints]
+workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true }
+rust_decimal = { workspace = true }
+
+# Persistence Models — SeaORM macros only. The runtime / driver features
+# live in budget-infrastructure; the workspace's feature unification merges
+# them without duplicating compile units. `with-rust_decimal` integrates the
+# Money backing type with Postgres NUMERIC columns.
+sea-orm = { workspace = true, features = ["macros", "with-rust_decimal", "with-chrono", "with-uuid"] }

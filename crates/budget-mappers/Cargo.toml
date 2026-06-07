@@ -1,0 +1,19 @@
+[package]
+name = "budget-mappers"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Translation layer between SeaORM Model types (budget-entities) and domain types (budget-domain). Own crate so neither domain nor infrastructure depends on the other (MAPPER-1)."
+
+[lints]
+workspace = true
+
+[dependencies]
+budget-domain = { path = "../budget-domain" }
+budget-entities = { path = "../budget-entities" }
+
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+rust_decimal = { workspace = true }

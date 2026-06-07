@@ -1,0 +1,44 @@
+[package]
+name = "budget-infrastructure"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Concrete adapters: SeaORM persistence (repository impls + UnitOfWork), Azure Key Vault, Plaid client, etc."
+
+[lints]
+workspace = true
+
+[dependencies]
+budget-domain = { path = "../budget-domain" }
+budget-entities = { path = "../budget-entities" }
+budget-mappers = { path = "../budget-mappers" }
+
+# Repository traits are declared in budget-domain with `#[async_trait]`; the
+# impls in this crate need the same macro on the impl blocks.
+async-trait = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+rust_decimal = { workspace = true }
+tracing = { workspace = true }
+
+# Persistence: SeaORM 1.x backed by sqlx-postgres on the tokio runtime with
+# rustls TLS. Runtime + driver are explicit because SeaORM doesn't pick those
+# by default.
+sea-orm = { workspace = true, features = [
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+    "macros",
+    "with-rust_decimal",
+    "with-chrono",
+    "with-uuid",
+] }
+
+# Other concrete-tech deps (reqwest for Plaid, azure_* for Key Vault, TOTP,
+# etc.) get added here as each subsystem lands during the backend build.
