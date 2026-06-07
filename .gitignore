@@ -1,0 +1,17 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
+
+# Env / secrets
+.env
+.env.*
+
+# OS
+.DS_Store
