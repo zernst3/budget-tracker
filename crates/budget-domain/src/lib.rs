@@ -68,6 +68,6 @@ pub use repositories::{
     PlaidItemRepository, TransactionRepository, UserRepository,
 };
 pub use transaction::Transaction;
-pub use uow::{UnitOfWork, UowFuture, UowProvider};
+pub use uow::{UnitOfWork, UowFuture, UowProvider, UowProviderExt};
 pub use user::User;
 pub use validated::{AccessTokenRef, Email};

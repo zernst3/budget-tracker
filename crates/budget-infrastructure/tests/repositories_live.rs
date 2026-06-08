@@ -46,7 +46,9 @@ use budget_domain::repositories::{
     BudgetRepository, MonthRepository, TransactionRepository, UserRepository,
 };
 use budget_domain::transaction::Transaction;
-use budget_domain::uow::UowProvider;
+// `UowProviderExt` carries the ergonomic generic `run(..)`; the base
+// `UowProvider` trait stays dyn-compatible by keeping only `run_boxed`.
+use budget_domain::uow::UowProviderExt;
 use budget_domain::user::User;
 use budget_domain::validated::Email;
 

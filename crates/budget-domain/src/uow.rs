@@ -63,11 +63,14 @@ type BoxedUowClosure<'a> =
 /// Runs a closure inside a database transaction, committing on `Ok` and rolling
 /// back on `Err` (`REPO-10`).
 ///
-/// The object-safe core is [`UowProvider::run_boxed`]; the ergonomic, generic
-/// [`UowProvider::run`] is a default method that boxes the closure's return
-/// value and downcasts it back. Services depend on `Arc<dyn UowProvider>`
-/// (`SERVICE-DI-1`); the concrete `SeaOrmUowProvider` lives in
-/// `budget-infrastructure`.
+/// The object-safe core is the single trait method [`UowProvider::run_boxed`].
+/// The ergonomic, generic `run(..)` callers actually use lives on the
+/// [`UowProviderExt`] extension trait (blanket-implemented for every provider,
+/// including `dyn UowProvider`), which boxes the closure's return value and
+/// downcasts it back. Keeping the generic method off the base trait is what lets
+/// [`UowProvider`] stay dyn-compatible so services can depend on `Arc<dyn
+/// UowProvider>` (`SERVICE-DI-1` / `REPO-10`); the concrete `SeaOrmUowProvider`
+/// lives in `budget-infrastructure`.
 #[async_trait]
 pub trait UowProvider: Send + Sync {
     /// Object-safe core: run a boxed closure inside a transaction.
@@ -82,40 +85,67 @@ pub trait UowProvider: Send + Sync {
         &self,
         f: BoxedUowClosure<'_>,
     ) -> Result<Box<dyn Any + Send>, RepositoryError>;
+}
 
-    /// Ergonomic, generic wrapper over [`UowProvider::run_boxed`].
+/// Shared implementation of the ergonomic `run` wrapper behind
+/// [`UowProviderExt::run`]. It boxes the closure's typed result and downcasts it
+/// back; living in one free function means the boxing/downcasting logic has a
+/// single definition.
+async fn run_via<P, F, T>(provider: &P, f: F) -> Result<T, RepositoryError>
+where
+    P: UowProvider + ?Sized,
+    F: for<'u> FnOnce(&'u dyn UnitOfWork) -> UowFuture<'u, T> + Send + 'static,
+    T: Send + 'static,
+{
+    let boxed: BoxedUowClosure<'static> = Box::new(move |uow| {
+        Box::pin(async move {
+            let value = f(uow).await?;
+            Ok(Box::new(value) as Box<dyn Any + Send>)
+        })
+    });
+    let any = provider.run_boxed(boxed).await?;
+    any.downcast::<T>().map(|b| *b).map_err(|_| {
+        RepositoryError::Database(
+            "unit-of-work result downcast failed (internal type mismatch)".to_string(),
+        )
+    })
+}
+
+/// Extension trait carrying the ergonomic, generic `run(..)` wrapper over
+/// [`UowProvider::run_boxed`] (`REPO-10`).
+///
+/// The generic `run` cannot live on [`UowProvider`] itself: a generic method
+/// would make the trait dyn-incompatible, defeating the `Arc<dyn UowProvider>`
+/// DI shape (`SERVICE-DI-1`). It lives here instead and is blanket-implemented
+/// for every `?Sized` provider — which includes both concrete providers and `dyn
+/// UowProvider` — delegating to the [`run_via`] helper. A service that owns
+/// `Arc<dyn UowProvider>` brings this trait into scope and writes
+/// `self.uow.run(..)` with ordinary typed code:
+///
+/// ```ignore
+/// self.uow.run(|tx| Box::pin(async move {
+///     self.transactions.save(&txn, Some(tx)).await?;
+///     self.funds.save(&fund, Some(tx)).await?;
+///     Ok(())
+/// })).await
+/// ```
+#[async_trait]
+pub trait UowProviderExt: UowProvider {
+    /// Run a closure inside a transaction, returning its typed result.
     ///
-    /// Boxes the closure's typed result on the way out and downcasts it back on
-    /// the way in, so callers write ordinary typed code:
-    ///
-    /// ```ignore
-    /// self.uow.run(|tx| Box::pin(async move {
-    ///     self.transactions.insert(&txn, Some(tx)).await?;
-    ///     self.funds.draw(fund_id, amount, Some(tx)).await?;
-    ///     Ok(())
-    /// })).await
-    /// ```
+    /// Boxes the closure's result on the way out and downcasts it back on the
+    /// way in, over the object-safe [`UowProvider::run_boxed`].
     ///
     /// # Errors
-    /// Propagates the closure's [`RepositoryError`]. A downcast failure (which
-    /// would indicate a logic bug in this wrapper, not a runtime input) is
-    /// surfaced as [`RepositoryError::Database`].
+    /// Propagates the closure's [`RepositoryError`]; an internal downcast
+    /// mismatch surfaces as [`RepositoryError::Database`].
     async fn run<F, T>(&self, f: F) -> Result<T, RepositoryError>
     where
         F: for<'u> FnOnce(&'u dyn UnitOfWork) -> UowFuture<'u, T> + Send + 'static,
         T: Send + 'static,
     {
-        let boxed: BoxedUowClosure<'static> = Box::new(move |uow| {
-            Box::pin(async move {
-                let value = f(uow).await?;
-                Ok(Box::new(value) as Box<dyn Any + Send>)
-            })
-        });
-        let any = self.run_boxed(boxed).await?;
-        any.downcast::<T>().map(|b| *b).map_err(|_| {
-            RepositoryError::Database(
-                "unit-of-work result downcast failed (internal type mismatch)".to_string(),
-            )
-        })
+        run_via(self, f).await
     }
 }
+
+impl<P: UowProvider + ?Sized> UowProviderExt for P {}

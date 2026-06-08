@@ -8,3 +8,9 @@
 //! Dioxus server functions (`D1`: server functions -> services -> repositories).
 //!
 //! Services land in build step 3+ (see `.build-progress.md`).
+
+pub mod income;
+pub mod month_lifecycle;
+
+pub use income::{FixedExpectation, IncomeExpectation, SemimonthlyFixedExpectation};
+pub use month_lifecycle::{MonthLifecycleService, net_leftover};

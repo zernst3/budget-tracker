@@ -37,6 +37,10 @@ async-trait = "0.1"
 
 # Time + IDs
 chrono = { version = "0.4", features = ["serde"] }
+# Fixed home-timezone (America/New_York) month-membership resolution (D2 /
+# ARCH-UTC-TIMESTAMPS-1). The crate carries the IANA tz database; the domain
+# stays UTC and only the service layer converts at the membership boundary.
+chrono-tz = "0.10"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 
 # Short-ID generation (10-char Base62), mirroring the Agora DOMAIN-9 pattern.

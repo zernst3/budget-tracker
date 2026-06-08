@@ -17,6 +17,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
+# Fixed home-TZ month-membership (America/New_York, D2). Used only to decide
+# which calendar (year, month) a UTC instant belongs to; the domain stays UTC.
+chrono-tz = { workspace = true }
 uuid = { workspace = true }
 rust_decimal = { workspace = true }
 tracing = { workspace = true }
@@ -26,3 +29,9 @@ tracing = { workspace = true }
 # crate. This keeps app-services WASM-compatible for Dioxus server functions
 # (D1: server functions -> services -> repositories).
 async-trait = { workspace = true }
+
+[dev-dependencies]
+# A minimal current-thread runtime to drive the async service tests
+# (`#[tokio::test]`). Test-only; the crate itself stays runtime-free so it
+# remains WASM-compatible for Dioxus server functions.
+tokio = { version = "1.40", features = ["macros", "rt"] }
