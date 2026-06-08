@@ -1,6 +1,6 @@
 # Budget Tracker — Project Spec
 
-> **Status: PHASE-1 RESOLVED / build-ready** (sequenced after chorale v0.2.0 + the portfolio site). Captured 2026-06-05; design extended 2026-06-07 (income model §4.8, sinking funds §4.7, buffer/surplus/large-purchase model §4.9, revised infra §8 to Neon-free, dogfood sequencing §7). **Phase-1 decisions folded in 2026-06-07 — see §12 (authoritative resolutions) and `CONVENTIONS.md` (the 10 project-local `BUDGET-*` rules).**
+> **Status: PHASE-1 RESOLVED / build-ready** (sequenced after chorale v0.2.0 + the portfolio site). Captured 2026-06-05; design extended 2026-06-07 (income model §4.8, sinking funds §4.7, buffer/surplus/large-purchase model §4.9, revised infra §8 to Neon-free, dogfood sequencing §7). **Phase-1 decisions folded in 2026-06-07 — see §12 (authoritative resolutions). The project ruleset is emitted in Camerata format to `CONVENTIONS.md` (structured/mechanical) and `AGENTS.md` (prose), including the 11 project-local `BUDGET-*` rules.**
 > **V1 is tailored ENTIRELY to Zach (sole user).** His personal compulsory-repay-buffer model (§4.9) is encoded as-is; broader customizability for other financial styles is explicitly deferred.
 > **Sequencing:** build AFTER (1) chorale v0.2.0 ships and (2) the new Rust portfolio website,
 > both of which are higher priority because they're job-search-relevant. This is a personal-life
@@ -278,6 +278,12 @@ users
   tracking_start_date,        -- day-1 / genesis cutover (D8, §12); everything before is CLOSED; Plaid never ingests pre-this-date txns
   created_at
 
+webauthn_credentials          -- §9.1: passkeys / biometric login (WebAuthn); one user, many devices
+  id, user_id→users,
+  credential_id UNIQUE, public_key, sign_count,
+  transports?, aaguid?, nickname?, created_at, last_used_at?
+  -- session storage is Postgres-backed (server-side session store manages its own table); not modeled here
+
 budgets                       -- versioned config; months REFERENCE this
   id, user_id→users, name, effective_from, effective_to?(null=current), created_at
 
@@ -448,6 +454,22 @@ The main screen is a **transactions table** built on chorale (Zach's own library
 - The schema is already multi-user-shaped (`user_id` everywhere) so it doesn't preclude a future
   product, but write **zero** multi-user code now.
 
+### 9.1 App-level security — how "only Zach sees the data" (RESOLVED 2026-06-07)
+The BoA/Plaid layer secures the *pull* (read-only token in Key Vault, §6). This subsection secures the
+*app* and is encoded as `BUDGET-AUTH-GATE-1`:
+- **No public signup.** The single user is provisioned out of band (seed/CLI); the site exposes only a login.
+- **Login = password (Argon2) + mandatory TOTP**, plus **passkeys / WebAuthn** for biometric login
+  (Touch ID / Face ID / fingerprint). Passkeys are day-to-day; TOTP is the fallback. Reuses Agora's auth
+  patterns. (A web app cannot read the fingerprint sensor directly; WebAuthn has the OS mediate the
+  biometric and return a public-key assertion.)
+- **Sessions = secure, HttpOnly, SameSite=Strict cookies**, backed by a **Postgres-backed server-side
+  session store** so sessions survive the scale-to-zero cold starts (the store manages its own table).
+- **Enforce-by-construction authz:** every data-returning server function / route requires an
+  `AuthedUser` extractor; without a valid session it returns 401 and reaches no data. Request identity is
+  obtainable ONLY through that extractor, so an ungated data path cannot return data by construction.
+- **Every query is scoped to the authenticated `user_id`** (defense in depth).
+- **HTTPS-only ingress** (Container Apps managed TLS; insecure connections disabled).
+
 ## 10. Open questions / to revisit when building
 
 > **All Phase-1 open questions are now RESOLVED (2026-06-07); see §12 for the authoritative resolutions. The items below are retained for historical context.**
@@ -485,8 +507,8 @@ The main screen is a **transactions table** built on chorale (Zach's own library
 ## 12. Phase-1 Resolved Decisions (AUTHORITATIVE — folded in 2026-06-07)
 
 All Phase-1 open decisions from `PHASE_1_REPORT.md` are resolved. This section is authoritative and
-supersedes any earlier ambiguity in §§1–11. The ten project-local rules referenced here are defined in
-full in `CONVENTIONS.md`.
+supersedes any earlier ambiguity in §§1–11. The eleven project-local rules referenced here are defined
+in `CONVENTIONS.md` (the Camerata-emitted ruleset).
 
 ### Blocking decisions
 - **D1 — API boundary: Dioxus server functions → services → repositories.** Server functions are the
@@ -549,13 +571,28 @@ the cleanest case and eliminates the partial-first-month and lock-gap complicati
 therefore be **re-runnable** (a test phase, then a clean reset to the real day 1), and a month-start
 day-1 needs only the starting balances, not per-category month-to-date charges.
 
+### App-level security (D-sec — added 2026-06-07)
+"Only Zach can see the data" is a layer separate from the BoA/Plaid read-only pull. Encoded as
+`BUDGET-AUTH-GATE-1`, detailed in §9.1: no public signup; password (Argon2) + mandatory TOTP +
+passkeys/WebAuthn (biometric login); secure HttpOnly SameSite cookies on a **Postgres-backed** session
+store (survives scale-to-zero); an `AuthedUser` enforce-by-construction gate on every data path; all
+queries scoped to the authenticated `user_id`; HTTPS-only. Schema adds a `webauthn_credentials` table
+(§5, design-complete). Built in the auth slice (report §8 step 7).
+
+### PWA (mobile) — frontend phase
+The app ships as an **installable PWA** (web app manifest + a thin service worker + icons; standalone
+display) so it installs to the phone home screen. **Not** offline-first (a server-backed budget app
+needs the DB; offline sync is unjustified complexity per `SPIRIT-ROBUSTNESS-1`). Built in the frontend
+phase alongside the chorale UI; biometric login uses the passkeys above.
+
 ### Project-local rules adopted (full definitions in `CONVENTIONS.md`)
 `BUDGET-MONEY-1`, `BUDGET-NO-DOUBLE-CHARGE-1`, `BUDGET-ROLLOVER-INTEGRITY-1`,
 `BUDGET-PLAID-TOKEN-VAULT-1`, `BUDGET-STATUS-DRIVES-INCLUSION-1`, `BUDGET-FUND-EARMARK-1`,
-`BUDGET-IDEMPOTENT-MONTH-INIT-1`, `BUDGET-PLAID-SIGN-1`, `BUDGET-SETTLE-ON-MATCH-1`, and
-`BUDGET-CUTOVER-1` (10 total). `BUDGET-MONEY-1` is an elevation to *mechanical* enforcement of the
-existing `ARCH-EXACT-DECIMALS-1` / `DOMAIN-8`. Any of these may be promoted to portable Camerata
-principles later if they recur.
+`BUDGET-IDEMPOTENT-MONTH-INIT-1`, `BUDGET-PLAID-SIGN-1`, `BUDGET-SETTLE-ON-MATCH-1`,
+`BUDGET-CUTOVER-1`, and `BUDGET-AUTH-GATE-1` (11 total). `BUDGET-MONEY-1` is an elevation to
+*mechanical* enforcement of the existing `ARCH-EXACT-DECIMALS-1` / `DOMAIN-8`. The full project ruleset
+(stack-applicable Camerata library rules + these 11) is emitted to `CONVENTIONS.md` (structured/
+mechanical) and `AGENTS.md` (prose) in Camerata format.
 
 ### Phase-2 build setup (resolved 2026-06-07)
 - **Repo:** a new **public** git repo at **`~/Documents/Repos/budget-tracker`** (local + GitHub
