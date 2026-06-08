@@ -28,6 +28,7 @@ use crate::ids::{
 use crate::month::Month;
 use crate::paycheck_config::PaycheckConfig;
 use crate::plaid_item::PlaidItem;
+use crate::projections::{CategorySpent, MonthNet};
 use crate::repayment_obligation::RepaymentObligation;
 use crate::transaction::Transaction;
 use crate::uow::UnitOfWork;
@@ -257,6 +258,39 @@ pub trait TransactionRepository: Send + Sync {
         &self,
         month_id: MonthId,
     ) -> Result<Vec<Transaction>, RepositoryError>;
+
+    /// Per-category spent totals for a month, aggregated in a single SQL query
+    /// (`REPO-9` / `RUST-SEAORM-PROJECTION-TYPES-1`; `DB-NPLUSONE-1`).
+    ///
+    /// Returns one [`CategorySpent`] per category that has at least one
+    /// budget-counting transaction in the month. The status filter is exactly the
+    /// inclusion polarity of [`crate::predicates::counts_in_budget`]
+    /// (`BUDGET-STATUS-DRIVES-INCLUSION-1`: settled + expected; pending excluded),
+    /// applied in SQL so the whole grouping is one round-trip rather than N
+    /// per-category queries (`SQL-DB-NPLUSONE-1`). Uncategorized rows
+    /// (`category_id IS NULL`) are excluded — they belong to no category bucket.
+    /// The returned signed sums feed [`crate::predicates::fixed_category_spent`]
+    /// in the service layer (`BUDGET-NO-DOUBLE-CHARGE-1`).
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure.
+    async fn category_spent_for_month(
+        &self,
+        month_id: MonthId,
+    ) -> Result<Vec<CategorySpent>, RepositoryError>;
+
+    /// The net position of a month — the signed sum of every budget-counting
+    /// transaction in it, computed in a single SQL aggregate (`REPO-9` /
+    /// `RUST-SEAORM-PROJECTION-TYPES-1`; `DB-NPLUSONE-1`).
+    ///
+    /// The same inclusion polarity applies (`BUDGET-STATUS-DRIVES-INCLUSION-1`).
+    /// This is the rolling-Other input (`SPEC §4.3`, build step 4). Returns a
+    /// [`MonthNet`] with a zero `net` when the month has no counting
+    /// transactions (rather than `None`), so callers always get a usable figure.
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure.
+    async fn month_net(&self, month_id: MonthId) -> Result<MonthNet, RepositoryError>;
 
     /// Insert or update a transaction. Used for manual entry, Plaid `added`,
     /// posting the rollover row, and recording a settlement/match

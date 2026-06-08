@@ -31,6 +31,7 @@ pub mod month;
 pub mod paycheck_config;
 pub mod plaid_item;
 pub mod predicates;
+pub mod projections;
 pub mod repayment_obligation;
 pub mod repositories;
 pub mod transaction;
@@ -60,6 +61,7 @@ pub use month::Month;
 pub use paycheck_config::PaycheckConfig;
 pub use plaid_item::PlaidItem;
 pub use predicates::{FixedSettlement, counts_in_budget, fixed_category_spent};
+pub use projections::{CategorySpent, MonthNet};
 pub use repayment_obligation::RepaymentObligation;
 pub use repositories::{
     BudgetRepository, FundRepository, MonthRepository, PaycheckConfigRepository,

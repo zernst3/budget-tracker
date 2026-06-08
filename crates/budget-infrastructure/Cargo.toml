@@ -48,3 +48,8 @@ sea-orm = { workspace = true, features = [
 
 # Other concrete-tech deps (reqwest for Plaid, azure_* for Key Vault, TOTP,
 # etc.) get added here as each subsystem lands during the backend build.
+
+# The repository integration tests (tests/repositories_live.rs) reuse the
+# regular `budget-migration` + `sea-orm` deps above to bring up a live SeaORM
+# connection (gated on DATABASE_URL, no-op in CI until Neon is provisioned per
+# SPEC §12). No extra dev-dependencies are needed.

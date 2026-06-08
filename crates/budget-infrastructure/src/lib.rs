@@ -5,11 +5,31 @@
 //! stored only as a secret reference, `BUDGET-PLAID-TOKEN-VAULT-1`), and the
 //! Plaid Transactions-only client. Depends on domain, entities, and mappers.
 //!
-//! Adapters land in build step 3+ (see `.build-progress.md`).
+//! Build step 3 lands the repository layer: one `Postgres*Repository` per
+//! aggregate trait, the [`SeaOrmUow`](uow::SeaOrmUow) /
+//! [`SeaOrmUowProvider`](uow::SeaOrmUowProvider) unit-of-work primitive, the
+//! shared error translation, the executor resolver, and the generic upsert.
 //!
-//! The schema migration runner is wired now: [`run_pending_migrations`] applies
+//! The schema migration runner is also wired: [`run_pending_migrations`] applies
 //! the `budget-migration` `Migrator` so the SPEC §5 tables and §12 DB
 //! constraints exist before any repository runs.
+
+pub mod conn;
+pub mod error;
+pub mod repositories;
+pub mod uow;
+pub mod upsert;
+
+// Re-export the concrete repository impls + the unit-of-work primitive at the
+// crate root so the application edge wires them without deep paths.
+pub use repositories::budgets::PostgresBudgetRepository;
+pub use repositories::funds::PostgresFundRepository;
+pub use repositories::months::PostgresMonthRepository;
+pub use repositories::paycheck_config::PostgresPaycheckConfigRepository;
+pub use repositories::plaid_items::PostgresPlaidItemRepository;
+pub use repositories::transactions::PostgresTransactionRepository;
+pub use repositories::users::PostgresUserRepository;
+pub use uow::{SeaOrmUow, SeaOrmUowProvider};
 
 use sea_orm_migration::MigratorTrait;
 
