@@ -11,8 +11,8 @@ In development via an orchestrated, model-tiered build routine (manually trigger
 ## Docs
 
 - [`SPEC.md`](SPEC.md) — the authoritative, Phase-1-resolved spec (see §12 for resolved decisions).
-- [`CONVENTIONS.md`](CONVENTIONS.md) — the project-local `BUDGET-*` rules.
-- [`PHASE_1_REPORT.md`](PHASE_1_REPORT.md) — the planning/investigation report.
-- [`DECISIONS.md`](DECISIONS.md) — Phase-1 decision resolutions.
+- [`CONVENTIONS.md`](CONVENTIONS.md) — structured + mechanical rules (Camerata emitted format).
+- [`AGENTS.md`](AGENTS.md) — prose-enforcement rules the agent applies by judgment (Camerata emitted format).
+- [`docs/planning/`](docs/planning/) — the Phase-1 planning report, decision log, and kickoff (historical).
 
 This project is built by orchestrating AI under documented convention rules; see `SPEC.md` and `CONVENTIONS.md`.
