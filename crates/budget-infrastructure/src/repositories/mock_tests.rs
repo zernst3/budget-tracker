@@ -52,10 +52,10 @@ use budget_mappers::{
     transactions as transactions_mapper, users as users_mapper,
 };
 
-use crate::repositories::users::PostgresUserRepository;
 use crate::repositories::budgets::PostgresBudgetRepository;
 use crate::repositories::months::PostgresMonthRepository;
 use crate::repositories::transactions::PostgresTransactionRepository;
+use crate::repositories::users::PostgresUserRepository;
 use crate::uow::SeaOrmUow;
 
 // ---------------------------------------------------------------------------
@@ -88,11 +88,7 @@ fn sample_budget_model(id: Uuid, user_id: Uuid) -> budgets::Model {
     }
 }
 
-fn sample_category_model(
-    id: Uuid,
-    budget_id: Uuid,
-    is_rollover_bucket: bool,
-) -> categories::Model {
+fn sample_category_model(id: Uuid, budget_id: Uuid, is_rollover_bucket: bool) -> categories::Model {
     categories::Model {
         id,
         budget_id,
@@ -340,7 +336,10 @@ mod mapper_round_trips {
             true,
         );
         let domain = transactions_mapper::model_to_domain(m).expect("mapper succeeds");
-        assert!(domain.is_rollover, "BUDGET-ROLLOVER-INTEGRITY-1: flag preserved");
+        assert!(
+            domain.is_rollover,
+            "BUDGET-ROLLOVER-INTEGRITY-1: flag preserved"
+        );
     }
 
     #[test]
@@ -476,10 +475,7 @@ mod budget_repo {
             .append_query_results([[model]])
             .into_connection();
         let repo = PostgresBudgetRepository::new(db);
-        let result = repo
-            .find_by_id(BudgetId::new(id))
-            .await
-            .expect("no error");
+        let result = repo.find_by_id(BudgetId::new(id)).await.expect("no error");
         let budget = result.expect("row present");
         assert_eq!(budget.id, BudgetId::new(id));
         assert_eq!(budget.user_id, UserId::new(user_id));
@@ -595,7 +591,10 @@ mod month_repo {
             .append_query_results([Vec::<months::Model>::new()])
             .into_connection();
         let repo = PostgresMonthRepository::new(db);
-        let result = repo.find_latest(UserId::generate()).await.expect("no error");
+        let result = repo
+            .find_latest(UserId::generate())
+            .await
+            .expect("no error");
         assert!(result.is_none());
     }
 
@@ -824,10 +823,7 @@ mod transaction_repo {
             .await
             .expect("no error");
         let txn = result.expect("row present");
-        assert_eq!(
-            txn.plaid_transaction_id.as_deref(),
-            Some("plaid-abc")
-        );
+        assert_eq!(txn.plaid_transaction_id.as_deref(), Some("plaid-abc"));
     }
 
     // --- category_spent_for_month (raw SQL aggregate, REPO-9) ---------------
@@ -927,9 +923,16 @@ mod transaction_repo {
             .append_query_results([[row]])
             .into_connection();
         let repo = PostgresTransactionRepository::new(db);
-        let result = repo.month_net(MonthId::new(month_id)).await.expect("no error");
+        let result = repo
+            .month_net(MonthId::new(month_id))
+            .await
+            .expect("no error");
         assert_eq!(result.month_id, MonthId::new(month_id));
-        assert_eq!(result.net, Money::ZERO, "empty month nets to zero, never None");
+        assert_eq!(
+            result.net,
+            Money::ZERO,
+            "empty month nets to zero, never None"
+        );
     }
 
     #[tokio::test]
@@ -941,7 +944,10 @@ mod transaction_repo {
             .append_query_results([[row]])
             .into_connection();
         let repo = PostgresTransactionRepository::new(db);
-        let result = repo.month_net(MonthId::new(month_id)).await.expect("no error");
+        let result = repo
+            .month_net(MonthId::new(month_id))
+            .await
+            .expect("no error");
         assert_eq!(result.net, Money::from_minor(-14000));
         assert_eq!(result.month_id, MonthId::new(month_id));
     }
@@ -955,7 +961,10 @@ mod transaction_repo {
             .append_query_results([[row]])
             .into_connection();
         let repo = PostgresTransactionRepository::new(db);
-        let result = repo.month_net(MonthId::new(month_id)).await.expect("no error");
+        let result = repo
+            .month_net(MonthId::new(month_id))
+            .await
+            .expect("no error");
         assert!(result.net.is_positive());
         assert_eq!(result.net, Money::from_minor(35000));
     }
@@ -969,7 +978,10 @@ mod transaction_repo {
             .append_query_results([Vec::<MockRow>::new()])
             .into_connection();
         let repo = PostgresTransactionRepository::new(db);
-        let result = repo.month_net(MonthId::new(month_id)).await.expect("no error");
+        let result = repo
+            .month_net(MonthId::new(month_id))
+            .await
+            .expect("no error");
         assert_eq!(result.net, Money::ZERO, "fallback to zero, never None");
         assert_eq!(result.month_id, MonthId::new(month_id));
     }
@@ -1020,9 +1032,9 @@ mod transaction_repo {
 
 #[cfg(test)]
 mod uow_downcast {
-    use std::any::Any;
     use super::*;
     use budget_domain::uow::UnitOfWork;
+    use std::any::Any;
 
     /// A foreign `UnitOfWork` impl that is NOT a `SeaOrmUow` — exercises the
     /// rejection path.
