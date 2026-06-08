@@ -13,6 +13,11 @@ workspace = true
 budget-domain = { path = "../budget-domain" }
 budget-entities = { path = "../budget-entities" }
 
+# SeaORM is needed for ActiveModel / ActiveValue::Set in the domain_to_active_model
+# direction. The mapper crate is the boundary between entity and domain types, so
+# depending on sea-orm here is correct (MAPPER-1).
+sea-orm = { workspace = true }
+
 thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }

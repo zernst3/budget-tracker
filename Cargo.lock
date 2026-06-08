@@ -243,6 +243,7 @@ dependencies = [
  "budget-entities",
  "chrono",
  "rust_decimal",
+ "sea-orm",
  "thiserror",
  "uuid",
 ]
