@@ -31,7 +31,9 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
-# A minimal current-thread runtime to drive the async service tests
-# (`#[tokio::test]`). Test-only; the crate itself stays runtime-free so it
-# remains WASM-compatible for Dioxus server functions.
-tokio = { version = "1.40", features = ["macros", "rt"] }
+# A minimal runtime to drive the async service tests (`#[tokio::test]`).
+# `rt-multi-thread` is required only by the #[ignore]d live-DB concurrency
+# harness in tests/month_lifecycle_independent.rs (the genesis-init race the
+# rollover guard defends, BUDGET-IDEMPOTENT-MONTH-INIT-1). Test-only; the crate
+# itself stays runtime-free so it remains WASM-compatible for Dioxus server fns.
+tokio = { version = "1.40", features = ["macros", "rt", "rt-multi-thread"] }
