@@ -37,6 +37,12 @@ fn kind_to_entity(d: FundKind) -> funds::FundKind {
 /// Translate a `funds` [`funds::Model`] into a domain [`Fund`].
 ///
 /// Total — no validated newtypes on `Fund`.
+///
+/// # Errors
+///
+/// Currently infallible; returns `Result` for a uniform mapper signature
+/// (`MAPPER-1`) so every read-path entry point composes identically once
+/// fallible aggregates are added.
 pub fn model_to_domain(m: funds::Model) -> Result<Fund, MapperError> {
     Ok(Fund {
         id: FundId::new(m.id),
@@ -78,12 +84,10 @@ mod tests {
             user_id: Uuid::new_v4(),
             name: "Emergency Buffer".to_owned(),
             kind: funds::FundKind::Buffer,
-            balance: Decimal::new(500000, 2),     // $5000.00
-            target_balance: Some(Decimal::new(500000, 2)), // $5000.00 target
+            balance: Decimal::new(500_000, 2), // $5000.00
+            target_balance: Some(Decimal::new(500_000, 2)), // $5000.00 target
             compulsory_repayment: true,
-            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
-                .unwrap()
-                .into(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap().into(),
         }
     }
 
@@ -96,9 +100,7 @@ mod tests {
             balance: Decimal::new(60000, 2), // $600.00 saved so far
             target_balance: None,
             compulsory_repayment: false,
-            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
-                .unwrap()
-                .into(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap().into(),
         }
     }
 
@@ -117,7 +119,7 @@ mod tests {
     #[test]
     fn buffer_below_target_detected() {
         let mut m = buffer_model();
-        m.balance = Decimal::new(300000, 2); // $3000 — below $5000 target
+        m.balance = Decimal::new(300_000, 2); // $3000 — below $5000 target
         let domain = model_to_domain(m).unwrap_or_else(|_| unreachable!());
         assert!(domain.is_below_target());
         assert!(!domain.is_above_target());
@@ -126,7 +128,7 @@ mod tests {
     #[test]
     fn buffer_above_target_detected() {
         let mut m = buffer_model();
-        m.balance = Decimal::new(600000, 2); // $6000 — above $5000 target
+        m.balance = Decimal::new(600_000, 2); // $6000 — above $5000 target
         let domain = model_to_domain(m).unwrap_or_else(|_| unreachable!());
         assert!(domain.is_above_target());
         assert!(!domain.is_below_target());

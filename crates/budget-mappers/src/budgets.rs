@@ -22,6 +22,12 @@ use crate::MapperError;
 ///
 /// Total — no validated newtypes on `Budget`; the `Result` wrapper keeps the
 /// mapper interface uniform.
+///
+/// # Errors
+///
+/// Currently infallible; returns `Result` for a uniform mapper signature
+/// (`MAPPER-1`) so every read-path entry point composes identically once
+/// fallible aggregates are added.
 pub fn model_to_domain(m: budgets::Model) -> Result<Budget, MapperError> {
     Ok(Budget {
         id: BudgetId::new(m.id),
@@ -59,9 +65,7 @@ mod tests {
             name: "NYC Budget".to_owned(),
             effective_from: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap_or(NaiveDate::MIN),
             effective_to: None,
-            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
-                .unwrap()
-                .into(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap().into(),
         }
     }
 

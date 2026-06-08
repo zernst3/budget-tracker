@@ -28,7 +28,7 @@
 use sea_orm::entity::prelude::*;
 
 /// Transaction source (SPEC §5).
-#[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "transaction_source")]
 pub enum TransactionSource {
     #[sea_orm(string_value = "manual")]
@@ -42,7 +42,7 @@ pub enum TransactionSource {
 /// - `pending`: Plaid-seen but not yet settled — **EXCLUDED** from budget math.
 /// - `settled`: real transaction, confirmed — **INCLUDED**.
 /// - `expected`: manual placeholder for a known future charge — **INCLUDED** (reserves budget).
-#[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "transaction_status")]
 pub enum TransactionStatus {
     #[sea_orm(string_value = "pending")]
@@ -55,7 +55,7 @@ pub enum TransactionStatus {
 
 /// Income sub-kind for income-flow transactions (SPEC §4.8).
 /// NULL for expense/rollover rows; non-null for income rows.
-#[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "income_kind")]
 pub enum IncomeKind {
     /// Recurring paycheck — reconciles against expected income for the month.

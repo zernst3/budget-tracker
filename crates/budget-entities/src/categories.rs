@@ -21,7 +21,7 @@
 use sea_orm::entity::prelude::*;
 
 /// Bucket group: predictable fixed expenses vs. discretionary spending (SPEC §4.2).
-#[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "category_grp")]
 pub enum CategoryGrp {
     #[sea_orm(string_value = "fixed")]
@@ -34,7 +34,7 @@ pub enum CategoryGrp {
 /// `true_set`: amount known in advance (rent, phone).
 /// `flexible_set`: placeholder until real bill(s) land (utilities).
 /// NULL for discretionary categories.
-#[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "settle_type")]
 pub enum SettleType {
     #[sea_orm(string_value = "true_set")]
@@ -44,7 +44,7 @@ pub enum SettleType {
 }
 
 /// Accrual cadence (SPEC §4.7). Anything longer than monthly is a sinking fund.
-#[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "cadence")]
 pub enum Cadence {
     #[sea_orm(string_value = "monthly")]

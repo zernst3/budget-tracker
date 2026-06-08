@@ -20,7 +20,7 @@
 use sea_orm::entity::prelude::*;
 
 /// How expected monthly income is computed (SPEC §4.8).
-#[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "income_mode")]
 pub enum IncomeMode {
     /// Exact: expected = paychecks landing this month × amount. No averaging, no buffer.
@@ -33,7 +33,7 @@ pub enum IncomeMode {
 }
 
 /// Paycheck cadence (SPEC §4.8).
-#[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "paycheck_type")]
 pub enum PaycheckType {
     /// 24/yr — always exactly 2 paychecks/month. Zach's current cadence.
@@ -51,7 +51,7 @@ pub enum PaycheckType {
 }
 
 /// Default routing for over-expected income (SPEC §4.8).
-#[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "surplus_routing")]
 pub enum SurplusRouting {
     /// Default: accumulate surplus in the income smoothing buffer.

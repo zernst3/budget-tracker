@@ -19,7 +19,7 @@
 use sea_orm::entity::prelude::*;
 
 /// Month lifecycle status (SPEC §4.6).
-#[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "month_status")]
 pub enum MonthStatus {
     #[sea_orm(string_value = "open")]

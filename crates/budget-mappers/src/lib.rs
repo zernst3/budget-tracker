@@ -12,7 +12,7 @@
 //!   - `domain_to_active_model(v: &DomainType) -> ActiveModel` — writing to the
 //!     DB. Total because every domain value is already valid.
 //!
-//! Timestamp conversion rule (`DOMAIN-7`): SeaORM surfaces `TIMESTAMPTZ` columns
+//! Timestamp conversion rule (`DOMAIN-7`): `SeaORM` surfaces `TIMESTAMPTZ` columns
 //! as `DateTimeWithTimeZone` (i.e. `chrono::DateTime<chrono::FixedOffset>`).
 //! The domain uses `DateTime<Utc>`. Mappers call `.with_timezone(&Utc)` on every
 //! timestamp going into the domain, and call `.into()` going back out (chrono

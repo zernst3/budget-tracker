@@ -23,7 +23,7 @@
 use sea_orm::entity::prelude::*;
 
 /// Fund kind (SPEC §4.9).
-#[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "fund_kind")]
 pub enum FundKind {
     /// Emergency / working savings pool. `compulsory_repayment = true`.

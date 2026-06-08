@@ -112,6 +112,12 @@ fn build_transaction(m: transactions::Model, amount: Money) -> Transaction {
 /// positive = inflow). Use this when reading rows back from the DB.
 ///
 /// Total — no validated newtypes on `Transaction`.
+///
+/// # Errors
+///
+/// Currently infallible; returns `Result` for a uniform mapper signature
+/// (`MAPPER-1`) so every read-path entry point composes identically once
+/// fallible aggregates are added.
 pub fn model_to_domain(m: transactions::Model) -> Result<Transaction, MapperError> {
     let amount = Money::from_decimal(m.amount);
     Ok(build_transaction(m, amount))
@@ -134,6 +140,12 @@ pub fn model_to_domain(m: transactions::Model) -> Result<Transaction, MapperErro
 /// re-interprets the Plaid sign (`BUDGET-PLAID-SIGN-1`).
 ///
 /// Total — the sign flip cannot fail.
+///
+/// # Errors
+///
+/// Currently infallible; returns `Result` for a uniform mapper signature
+/// (`MAPPER-1`) so the Plaid-ingest path composes identically to the regular
+/// read path once fallible aggregates are added.
 pub fn plaid_model_to_domain(m: transactions::Model) -> Result<Transaction, MapperError> {
     // `BUDGET-PLAID-SIGN-1`: Plaid positive-outflow → internal negative-expense.
     // Negate once at this boundary. The runtime assertion below validates our
@@ -149,7 +161,8 @@ pub fn plaid_model_to_domain(m: transactions::Model) -> Result<Transaction, Mapp
     // In tests this will panic if the direction test fails, which is the desired
     // behavior for catching `BUDGET-PLAID-SIGN-1` regressions.
     debug_assert!(
-        plaid_raw.is_zero() || internal_amount.as_decimal().is_sign_negative() == plaid_raw.is_sign_positive(),
+        plaid_raw.is_zero()
+            || internal_amount.as_decimal().is_sign_negative() == plaid_raw.is_sign_positive(),
         "BUDGET-PLAID-SIGN-1 direction test failed: plaid_raw={plaid_raw}, internal={:?}",
         internal_amount.as_decimal()
     );
@@ -224,7 +237,10 @@ mod tests {
         // Plaid sends `12.50` for a $12.50 debit; we should store `-12.50`.
         let m = sample_model(Decimal::new(1250, 2)); // Plaid positive = outflow
         let domain = plaid_model_to_domain(m).unwrap_or_else(|_| unreachable!());
-        assert!(domain.amount.is_negative(), "Plaid debit should map to negative expense");
+        assert!(
+            domain.amount.is_negative(),
+            "Plaid debit should map to negative expense"
+        );
         assert_eq!(domain.amount.as_decimal(), Decimal::new(-1250, 2));
     }
 
@@ -233,7 +249,10 @@ mod tests {
         // Plaid sends `-50.00` for a $50 refund/credit; we should store `+50.00`.
         let m = sample_model(Decimal::new(-5000, 2)); // Plaid negative = inflow
         let domain = plaid_model_to_domain(m).unwrap_or_else(|_| unreachable!());
-        assert!(domain.amount.is_positive(), "Plaid credit should map to positive inflow");
+        assert!(
+            domain.amount.is_positive(),
+            "Plaid credit should map to positive inflow"
+        );
         assert_eq!(domain.amount.as_decimal(), Decimal::new(5000, 2));
     }
 
@@ -256,9 +275,18 @@ mod tests {
     #[test]
     fn all_statuses_map() {
         for (entity_status, expected) in [
-            (transactions::TransactionStatus::Pending, TransactionStatus::Pending),
-            (transactions::TransactionStatus::Settled, TransactionStatus::Settled),
-            (transactions::TransactionStatus::Expected, TransactionStatus::Expected),
+            (
+                transactions::TransactionStatus::Pending,
+                TransactionStatus::Pending,
+            ),
+            (
+                transactions::TransactionStatus::Settled,
+                TransactionStatus::Settled,
+            ),
+            (
+                transactions::TransactionStatus::Expected,
+                TransactionStatus::Expected,
+            ),
         ] {
             let mut m = sample_model(Decimal::new(-1000, 2));
             m.status = entity_status;
@@ -269,7 +297,7 @@ mod tests {
 
     #[test]
     fn income_kind_maps_when_present() {
-        let mut m = sample_model(Decimal::new(500000, 2)); // +$5000 paycheck
+        let mut m = sample_model(Decimal::new(500_000, 2)); // +$5000 paycheck
         m.income_kind = Some(transactions::IncomeKind::Budgeted);
         m.source = transactions::TransactionSource::Manual;
         let domain = model_to_domain(m).unwrap_or_else(|_| unreachable!());

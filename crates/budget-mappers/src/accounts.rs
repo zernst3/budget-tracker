@@ -49,6 +49,12 @@ fn account_type_to_entity(d: AccountType) -> accounts::AccountType {
 /// Translate an `accounts` [`accounts::Model`] into a domain [`Account`].
 ///
 /// Total — no validated newtypes on `Account`.
+///
+/// # Errors
+///
+/// Currently infallible; returns `Result` for a uniform mapper signature
+/// (`MAPPER-1`) so every read-path entry point composes identically once
+/// fallible aggregates are added.
 pub fn model_to_domain(m: accounts::Model) -> Result<Account, MapperError> {
     Ok(Account {
         id: AccountId::new(m.id),

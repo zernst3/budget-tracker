@@ -79,6 +79,12 @@ fn cadence_to_entity(d: Cadence) -> categories::Cadence {
 /// Translate a `categories` [`categories::Model`] into a domain [`Category`].
 ///
 /// Total — no validated newtypes on `Category`.
+///
+/// # Errors
+///
+/// Currently infallible; returns `Result` for a uniform mapper signature
+/// (`MAPPER-1`) so every read-path entry point composes identically once
+/// fallible aggregates are added.
 pub fn model_to_domain(m: categories::Model) -> Result<Category, MapperError> {
     Ok(Category {
         id: CategoryId::new(m.id),
@@ -131,7 +137,7 @@ mod tests {
             budget_id: Uuid::new_v4(),
             category_key: Uuid::new_v4(),
             name: "Rent".to_owned(),
-            amount: Decimal::new(2_50000, 2), // $2500.00
+            amount: Decimal::new(250_000, 2), // $2500.00
             grp: categories::CategoryGrp::Fixed,
             settle_type: Some(categories::SettleType::TrueSet),
             expected_bills: None,

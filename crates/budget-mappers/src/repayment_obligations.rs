@@ -39,7 +39,19 @@ fn status_to_entity(d: ObligationStatus) -> repayment_obligations::ObligationSta
 /// domain [`RepaymentObligation`].
 ///
 /// Total — no validated newtypes on `RepaymentObligation`.
-pub fn model_to_domain(m: repayment_obligations::Model) -> Result<RepaymentObligation, MapperError> {
+///
+/// # Errors
+///
+/// Currently infallible; returns `Result` for a uniform mapper signature
+/// (`MAPPER-1`) so every read-path entry point composes identically once
+/// fallible aggregates are added.
+// The owned `Model` is intentionally consumed: this is the read-path entry
+// point and callers hand off the just-fetched row. Every field is `Copy`, so
+// clippy sees no move, but the ownership contract is deliberate.
+#[allow(clippy::needless_pass_by_value)]
+pub fn model_to_domain(
+    m: repayment_obligations::Model,
+) -> Result<RepaymentObligation, MapperError> {
     Ok(RepaymentObligation {
         id: RepaymentObligationId::new(m.id),
         user_id: UserId::new(m.user_id),
@@ -85,14 +97,12 @@ mod tests {
             user_id: Uuid::new_v4(),
             fund_id: Uuid::new_v4(),
             transaction_id: Uuid::new_v4(),
-            total_amount: Decimal::new(200000, 2),      // $2000.00 MacBook
-            remaining_amount: Decimal::new(150000, 2),  // $1500.00 still owed
+            total_amount: Decimal::new(200_000, 2), // $2000.00 MacBook
+            remaining_amount: Decimal::new(150_000, 2), // $1500.00 still owed
             installment_amount: Decimal::new(50000, 2), // $500.00/month
             months_remaining: 3,
             status: repayment_obligations::ObligationStatus::Active,
-            created_at: Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0)
-                .unwrap()
-                .into(),
+            created_at: Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap().into(),
         }
     }
 
@@ -126,8 +136,14 @@ mod tests {
         let domain = model_to_domain(m).unwrap_or_else(|_| unreachable!());
         let am = domain_to_active_model(&domain);
         assert_eq!(am.total_amount, Set(domain.total_amount.as_decimal()));
-        assert_eq!(am.remaining_amount, Set(domain.remaining_amount.as_decimal()));
-        assert_eq!(am.installment_amount, Set(domain.installment_amount.as_decimal()));
+        assert_eq!(
+            am.remaining_amount,
+            Set(domain.remaining_amount.as_decimal())
+        );
+        assert_eq!(
+            am.installment_amount,
+            Set(domain.installment_amount.as_decimal())
+        );
     }
 
     #[test]

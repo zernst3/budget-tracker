@@ -9,9 +9,9 @@
 use chrono::Utc;
 use sea_orm::ActiveValue::Set;
 
+use budget_domain::ids::{PlaidItemId, UserId};
 use budget_domain::plaid_item::PlaidItem;
 use budget_domain::validated::AccessTokenRef;
-use budget_domain::ids::{PlaidItemId, UserId};
 
 use budget_entities::plaid_items;
 
@@ -23,11 +23,12 @@ use crate::MapperError;
 /// Returns [`MapperError::InvalidStoredValue`] if the stored `access_token_ref`
 /// fails [`AccessTokenRef::try_new`] (blank value indicates data corruption).
 pub fn model_to_domain(m: plaid_items::Model) -> Result<PlaidItem, MapperError> {
-    let access_token_ref =
-        AccessTokenRef::try_new(&m.access_token_ref).map_err(|e| MapperError::InvalidStoredValue {
+    let access_token_ref = AccessTokenRef::try_new(&m.access_token_ref).map_err(|e| {
+        MapperError::InvalidStoredValue {
             field: "access_token_ref",
             reason: e.to_string(),
-        })?;
+        }
+    })?;
 
     Ok(PlaidItem {
         id: PlaidItemId::new(m.id),
@@ -68,9 +69,7 @@ mod tests {
             access_token_ref: "kv://plaid/boa-item-1".to_owned(),
             sync_cursor: Some("cursor-abc".to_owned()),
             last_synced_at: None,
-            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
-                .unwrap()
-                .into(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap().into(),
         }
     }
 

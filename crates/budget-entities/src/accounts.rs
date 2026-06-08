@@ -12,7 +12,7 @@
 use sea_orm::entity::prelude::*;
 
 /// Account type (SPEC §5). Open-ended via enum; common values enumerated here.
-#[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "account_type")]
 pub enum AccountType {
     #[sea_orm(string_value = "checking")]

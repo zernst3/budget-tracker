@@ -82,6 +82,16 @@ fn surplus_routing_to_entity(d: SurplusRouting) -> paycheck_config::SurplusRouti
 /// [`PaycheckConfig`].
 ///
 /// Total — no validated newtypes on `PaycheckConfig`.
+///
+/// # Errors
+///
+/// Currently infallible; returns `Result` for a uniform mapper signature
+/// (`MAPPER-1`) so every read-path entry point composes identically once
+/// fallible aggregates are added.
+// The owned `Model` is intentionally consumed: this is the read-path entry
+// point and callers hand off the just-fetched row. Every field is `Copy`, so
+// clippy sees no move, but the ownership contract is deliberate.
+#[allow(clippy::needless_pass_by_value)]
 pub fn model_to_domain(m: paycheck_config::Model) -> Result<PaycheckConfig, MapperError> {
     Ok(PaycheckConfig {
         id: PaycheckConfigId::new(m.id),
@@ -124,7 +134,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             income_mode: paycheck_config::IncomeMode::PerPaycheck,
             paycheck_type: paycheck_config::PaycheckType::Semimonthly,
-            amount: Some(Decimal::new(350000, 2)), // $3500.00 per paycheck
+            amount: Some(Decimal::new(350_000, 2)), // $3500.00 per paycheck
             anchor_date: NaiveDate::from_ymd_opt(2026, 6, 15).unwrap_or(NaiveDate::MIN),
             surplus_routing: paycheck_config::SurplusRouting::Buffer,
             smoothing_buffer: Decimal::ZERO,
@@ -168,9 +178,18 @@ mod tests {
     #[test]
     fn all_surplus_routings_map() {
         for (entity_routing, expected) in [
-            (paycheck_config::SurplusRouting::Buffer, SurplusRouting::Buffer),
-            (paycheck_config::SurplusRouting::ThisMonth, SurplusRouting::ThisMonth),
-            (paycheck_config::SurplusRouting::Savings, SurplusRouting::Savings),
+            (
+                paycheck_config::SurplusRouting::Buffer,
+                SurplusRouting::Buffer,
+            ),
+            (
+                paycheck_config::SurplusRouting::ThisMonth,
+                SurplusRouting::ThisMonth,
+            ),
+            (
+                paycheck_config::SurplusRouting::Savings,
+                SurplusRouting::Savings,
+            ),
         ] {
             let mut m = semimonthly_model();
             m.surplus_routing = entity_routing;
@@ -184,14 +203,23 @@ mod tests {
         let m = semimonthly_model();
         let domain = model_to_domain(m).unwrap_or_else(|_| unreachable!());
         let am = domain_to_active_model(&domain);
-        assert_eq!(am.smoothing_buffer, Set(domain.smoothing_buffer.as_decimal()));
+        assert_eq!(
+            am.smoothing_buffer,
+            Set(domain.smoothing_buffer.as_decimal())
+        );
     }
 
     #[test]
     fn all_paycheck_types_map() {
         for (entity_type, expected) in [
-            (paycheck_config::PaycheckType::Semimonthly, PaycheckType::Semimonthly),
-            (paycheck_config::PaycheckType::Biweekly, PaycheckType::Biweekly),
+            (
+                paycheck_config::PaycheckType::Semimonthly,
+                PaycheckType::Semimonthly,
+            ),
+            (
+                paycheck_config::PaycheckType::Biweekly,
+                PaycheckType::Biweekly,
+            ),
             (paycheck_config::PaycheckType::Weekly, PaycheckType::Weekly),
             (paycheck_config::PaycheckType::Hourly, PaycheckType::Hourly),
         ] {

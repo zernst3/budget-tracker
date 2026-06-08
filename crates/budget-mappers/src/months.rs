@@ -36,6 +36,16 @@ fn status_to_entity(d: MonthStatus) -> months::MonthStatus {
 /// Translate a `months` [`months::Model`] into a domain [`Month`].
 ///
 /// Total — no validated newtypes on `Month`.
+///
+/// # Errors
+///
+/// Currently infallible (no validated newtypes); returns `Result` for a
+/// uniform mapper signature (`MAPPER-1`) so every entry point composes the same
+/// way once fallible aggregates are added.
+// The owned `Model` is intentionally consumed: this is the read-path entry
+// point and callers hand off the just-fetched row. All fields became `Copy`,
+// so clippy sees no move, but the ownership contract is deliberate.
+#[allow(clippy::needless_pass_by_value)]
 pub fn model_to_domain(m: months::Model) -> Result<Month, MapperError> {
     Ok(Month {
         id: MonthId::new(m.id),
@@ -78,9 +88,7 @@ mod tests {
             year: 2026,
             month: 6,
             status: months::MonthStatus::Open,
-            opened_at: Utc.with_ymd_and_hms(2026, 6, 1, 4, 0, 0)
-                .unwrap()
-                .into(),
+            opened_at: Utc.with_ymd_and_hms(2026, 6, 1, 4, 0, 0).unwrap().into(),
             closed_at: None,
         }
     }

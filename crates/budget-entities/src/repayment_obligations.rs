@@ -20,7 +20,7 @@
 use sea_orm::entity::prelude::*;
 
 /// Repayment obligation lifecycle status (SPEC §5).
-#[derive(Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "obligation_status")]
 pub enum ObligationStatus {
     #[sea_orm(string_value = "active")]

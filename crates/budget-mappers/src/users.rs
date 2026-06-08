@@ -2,16 +2,16 @@
 //!
 //! Conversions:
 //!   - `email: String` → `Email::try_new` (fallible — `MapperError` on invalid stored value)
-//!   - `tracking_start_date: Date` (SeaORM `NaiveDate`) → `NaiveDate` (same type; no conversion)
+//!   - `tracking_start_date: Date` (`SeaORM` `NaiveDate`) → `NaiveDate` (same type; no conversion)
 //!   - `created_at: DateTimeWithTimeZone` → `DateTime<Utc>` via `.with_timezone(&Utc)` (`DOMAIN-7`)
 //!   - `id / (no fk)`: `Uuid` → `UserId` via `From<Uuid>` (`DOMAIN-2`)
 
 use chrono::Utc;
 use sea_orm::ActiveValue::Set;
 
+use budget_domain::ids::UserId;
 use budget_domain::user::User;
 use budget_domain::validated::Email;
-use budget_domain::ids::UserId;
 
 use budget_entities::users;
 
@@ -65,11 +65,8 @@ mod tests {
             email: "zach@example.com".to_owned(),
             password_hash: "$argon2id$...".to_owned(),
             totp_secret: None,
-            tracking_start_date: NaiveDate::from_ymd_opt(2026, 7, 1)
-                .unwrap_or(NaiveDate::MIN),
-            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
-                .unwrap()
-                .into(),
+            tracking_start_date: NaiveDate::from_ymd_opt(2026, 7, 1).unwrap_or(NaiveDate::MIN),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap().into(),
         }
     }
 
@@ -82,11 +79,7 @@ mod tests {
         let expected_date = m.tracking_start_date;
 
         let domain = model_to_domain(m);
-        assert!(
-            domain.is_ok(),
-            "expected Ok, got: {:?}",
-            domain.err()
-        );
+        assert!(domain.is_ok(), "expected Ok, got: {:?}", domain.err());
         let u = domain.unwrap_or_else(|_| unreachable!());
 
         assert_eq!(u.id.value(), expected_id);
