@@ -1,0 +1,29 @@
+[package]
+name = "budget-migration"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "SeaORM schema migrations (sea-orm-migration). Materializes the SPEC §5 tables, the §12 DB constraints, and the DB-INDEX-1/2 indexes. Owns every DB-level invariant the entities only document in prose (ENTITIES-7/8)."
+
+[lints]
+workspace = true
+
+[dependencies]
+# The Migrator + the MigrationTrait / MigratorTrait surface, the schema DSL
+# (Table::create, Index::create, Type::create for pg enums), and the async
+# runner. Version-locked to sea-orm via the workspace dep.
+sea-orm-migration = { workspace = true }
+
+# async_trait is required on every `impl MigrationTrait` block.
+async-trait = { workspace = true }
+
+[dev-dependencies]
+# Integration tests bring up an in-process SeaORM connection to assert the
+# migrations apply cleanly. tokio drives the async test; sea-orm gives the
+# Database connector + Schema-manager introspection used by the up/down checks.
+tokio = { workspace = true }
+sea-orm = { workspace = true, features = [
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+] }

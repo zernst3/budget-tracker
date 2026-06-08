@@ -6,6 +6,7 @@ members = [
     "crates/budget-mappers",
     "crates/budget-infrastructure",
     "crates/budget-app-services",
+    "crates/budget-migration",
 ]
 
 [workspace.package]
@@ -55,6 +56,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Persistence: SeaORM 1.x. The entities crate uses macros-only; the
 # infrastructure crate adds the runtime + driver features.
 sea-orm = { version = "1.1" }
+
+# Schema migrations: sea-orm-migration 1.x, version-locked to sea-orm above.
+# Only the `budget-migration` crate (the Migrator + per-step migrations) and
+# the infrastructure crate (which re-runs the Migrator at server startup)
+# depend on it. The runtime/driver features mirror budget-infrastructure so
+# the Migrator can connect with the same sqlx-postgres + tokio + rustls stack.
+sea-orm-migration = { version = "1.1", default-features = false, features = [
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+] }
 
 # Workspace-wide lints. Each crate inherits via `[lints] workspace = true`.
 # The workspace forbids unsafe; clippy is run pedantic + -D unwrap_used

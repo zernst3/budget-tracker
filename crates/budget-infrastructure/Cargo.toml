@@ -14,6 +14,12 @@ budget-domain = { path = "../budget-domain" }
 budget-entities = { path = "../budget-entities" }
 budget-mappers = { path = "../budget-mappers" }
 
+# The schema Migrator (budget-migration::Migrator). The infrastructure crate is
+# the one place that connects to Postgres at startup, so it owns running pending
+# migrations (PROC-CI-MIGRATION-HYGIENE-1: the runner is idempotent).
+budget-migration = { path = "../budget-migration" }
+sea-orm-migration = { workspace = true }
+
 # Repository traits are declared in budget-domain with `#[async_trait]`; the
 # impls in this crate need the same macro on the impl blocks.
 async-trait = { workspace = true }
