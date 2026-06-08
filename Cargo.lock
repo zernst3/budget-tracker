@@ -211,7 +211,6 @@ dependencies = [
  "chrono",
  "rust_decimal",
  "sea-orm",
- "serde",
  "uuid",
 ]
 

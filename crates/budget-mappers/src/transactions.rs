@@ -131,10 +131,12 @@ pub fn model_to_domain(m: transactions::Model) -> Result<Transaction, MapperErro
 ///   - debit  (Plaid positive → `amount > 0`) becomes expense (internal negative → `amount < 0`)
 ///   - credit (Plaid negative → `amount < 0`) becomes inflow (internal positive → `amount > 0`)
 ///
-/// A runtime direction assertion fires if Plaid's inflow sign ever changes (i.e.
-/// a `pending = false, amount > 0` credit — which would already be negative under
-/// the internal convention after the flip, so the assertion checks `plaid_raw > 0`
-/// for an expense label).
+/// **Sign invariant (BUDGET-PLAID-SIGN-1):** after the flip, a nonzero Plaid debit
+/// (`plaid_raw > 0`) must produce a negative internal amount, and a nonzero Plaid
+/// credit (`plaid_raw < 0`) must produce a positive internal amount.  The
+/// `debug_assert!` below is keyed directly off `plaid_raw`'s sign — an independent
+/// signal from the arithmetic — so it would catch a future Plaid API change where
+/// the sign convention reverses.
 ///
 /// **Only this function handles Plaid-sign normalization.** No downstream code
 /// re-interprets the Plaid sign (`BUDGET-PLAID-SIGN-1`).
@@ -148,22 +150,23 @@ pub fn model_to_domain(m: transactions::Model) -> Result<Transaction, MapperErro
 /// read path once fallible aggregates are added.
 pub fn plaid_model_to_domain(m: transactions::Model) -> Result<Transaction, MapperError> {
     // `BUDGET-PLAID-SIGN-1`: Plaid positive-outflow → internal negative-expense.
-    // Negate once at this boundary. The runtime assertion below validates our
-    // assumption about which direction is positive in Plaid's API; if it fails in
-    // the future, it means Plaid changed their sign convention and we need to audit.
+    // Negate once at this boundary.
     let plaid_raw = m.amount;
     let internal_amount = Money::from_decimal(-plaid_raw);
 
-    // Direction test: a Plaid debit (plaid_raw > 0) should become an expense
-    // (internal < 0). A zero-amount is allowed (some pending rows are $0).
-    // The assertion is informational (logged in prod) — we do NOT return an error
-    // because a sign-direction warning should not block transaction ingestion.
-    // In tests this will panic if the direction test fails, which is the desired
-    // behavior for catching `BUDGET-PLAID-SIGN-1` regressions.
+    // Direction guard: after the flip a Plaid debit (plaid_raw > 0) must be
+    // negative internally, and a Plaid credit (plaid_raw < 0) must be positive
+    // internally.  This asserts against `plaid_raw`'s sign as an INDEPENDENT
+    // signal — if Plaid ever reverses their sign convention the raw value itself
+    // changes polarity, so this assert fires even though the negation is still
+    // mathematically correct.  Zero-amount rows (some pending) are exempt.
+    // In tests this panics on a direction regression; in prod it is a fast
+    // check that should never trigger.
     debug_assert!(
         plaid_raw.is_zero()
-            || internal_amount.as_decimal().is_sign_negative() == plaid_raw.is_sign_positive(),
-        "BUDGET-PLAID-SIGN-1 direction test failed: plaid_raw={plaid_raw}, internal={:?}",
+            || (plaid_raw.is_sign_positive() && internal_amount.as_decimal().is_sign_negative())
+            || (plaid_raw.is_sign_negative() && internal_amount.as_decimal().is_sign_positive()),
+        "BUDGET-PLAID-SIGN-1 direction guard failed: plaid_raw={plaid_raw}, internal={:?}",
         internal_amount.as_decimal()
     );
 
