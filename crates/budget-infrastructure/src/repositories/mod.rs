@@ -28,6 +28,9 @@ pub mod plaid_items;
 pub mod transactions;
 pub mod users;
 
+#[cfg(test)]
+mod mock_tests;
+
 use budget_domain::RepositoryError;
 use budget_mappers::MapperError;
 

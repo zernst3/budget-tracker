@@ -14,6 +14,16 @@
 //! ```text
 //! DATABASE_URL=postgres://localhost/budget_repo_test cargo test -p budget-infrastructure
 //! ```
+//!
+//! ### Why `connect_fresh` instead of `.clone()`
+//!
+//! `SeaORM`'s `DatabaseConnection` is `Clone` only when the `mock` feature is
+//! disabled. This crate enables `mock` in `[dev-dependencies]` so the lib
+//! test module (`src/repositories/mock_tests.rs`) can use `MockDatabase`.
+//! That feature propagates to all test targets via Cargo feature unification,
+//! removing `Clone` from `DatabaseConnection`. Each test therefore creates its
+//! own pool connection from the same URL rather than cloning a shared one.
+//! The overhead is negligible for an integration test that needs a live DB.
 
 // Test-only: panicking is the correct failure signal against a live DB; the
 // workspace denies panic in production code, this target is exempt by intent.
@@ -47,16 +57,28 @@ use budget_infrastructure::{
 use budget_migration::{Migrator, MigratorTrait};
 use sea_orm::{Database, DatabaseConnection};
 
-/// Connect + reset the schema, or `None` when `DATABASE_URL` is unset.
-async fn setup() -> Option<DatabaseConnection> {
-    let url = std::env::var("DATABASE_URL").ok()?;
-    let db = Database::connect(&url)
+/// Open a fresh connection pool to `url`.
+///
+/// Called by each test that needs a separate `DatabaseConnection` (see module
+/// doc for why `.clone()` is no longer available).
+async fn connect_fresh(url: &str) -> DatabaseConnection {
+    Database::connect(url)
         .await
-        .unwrap_or_else(|e| panic!("connect to {url}: {e}"));
+        .unwrap_or_else(|e| panic!("connect to {url}: {e}"))
+}
+
+/// Return the `DATABASE_URL` value if set, or `None` to skip the test.
+///
+/// The first call also resets the schema (fresh migrations) so each test suite
+/// run starts from a clean slate.  Individual tests call this first and bail
+/// early when `DATABASE_URL` is absent.
+async fn setup() -> Option<String> {
+    let url = std::env::var("DATABASE_URL").ok()?;
+    let db = connect_fresh(&url).await;
     Migrator::fresh(&db)
         .await
         .unwrap_or_else(|e| panic!("fresh schema: {e}"));
-    Some(db)
+    Some(url)
 }
 
 fn sample_user(id: UserId) -> User {
@@ -147,10 +169,12 @@ fn sample_txn(
 
 #[tokio::test]
 async fn user_save_and_find_round_trips_domain_types() {
-    let Some(db) = setup().await else {
+    let Some(url) = setup().await else {
         eprintln!("DATABASE_URL unset — skipping live repository test");
         return;
     };
+
+    let db = connect_fresh(&url).await;
     let repo = PostgresUserRepository::new(db);
     let id = UserId::generate();
     let user = sample_user(id);
@@ -182,7 +206,7 @@ async fn user_save_and_find_round_trips_domain_types() {
 
 #[tokio::test]
 async fn aggregates_honor_inclusion_polarity_in_one_query() {
-    let Some(db) = setup().await else {
+    let Some(url) = setup().await else {
         eprintln!("DATABASE_URL unset — skipping live aggregate test");
         return;
     };
@@ -192,10 +216,11 @@ async fn aggregates_honor_inclusion_polarity_in_one_query() {
     let category_id = CategoryId::generate();
     let month_id = MonthId::generate();
 
-    let users = PostgresUserRepository::new(db.clone());
-    let budgets = PostgresBudgetRepository::new(db.clone());
-    let months = PostgresMonthRepository::new(db.clone());
-    let txns = PostgresTransactionRepository::new(db.clone());
+    // Each repo gets its own fresh pool connection (see module doc).
+    let users = PostgresUserRepository::new(connect_fresh(&url).await);
+    let budgets = PostgresBudgetRepository::new(connect_fresh(&url).await);
+    let months = PostgresMonthRepository::new(connect_fresh(&url).await);
+    let txns = PostgresTransactionRepository::new(connect_fresh(&url).await);
 
     users.save(&sample_user(user_id), None).await.expect("user");
     budgets
@@ -280,24 +305,26 @@ async fn aggregates_honor_inclusion_polarity_in_one_query() {
 
 #[tokio::test]
 async fn unit_of_work_rolls_back_on_closure_error() {
-    let Some(db) = setup().await else {
+    let Some(url) = setup().await else {
         eprintln!("DATABASE_URL unset — skipping live UoW test");
         return;
     };
 
     let user_id = UserId::generate();
-    let users = PostgresUserRepository::new(db.clone());
-    let provider = SeaOrmUowProvider::new(db.clone());
+    let users = PostgresUserRepository::new(connect_fresh(&url).await);
+    let provider = SeaOrmUowProvider::new(connect_fresh(&url).await);
 
     // A UoW closure that saves a user then returns Err must leave NO user row.
     // The provider's `run` requires the closure be `Send + 'static`, so it owns a
-    // cloned connection + user and builds its own repo handle inside.
+    // fresh connection + user and builds its own repo handle inside.
     let user = sample_user(user_id);
-    let db_for_closure = db.clone();
+    let url_for_closure = url.clone();
     let result: Result<(), RepositoryError> = provider
         .run(move |uow| {
-            let inner_repo = PostgresUserRepository::new(db_for_closure);
+            let url2 = url_for_closure.clone();
             Box::pin(async move {
+                let inner_db = connect_fresh(&url2).await;
+                let inner_repo = PostgresUserRepository::new(inner_db);
                 inner_repo.save(&user, Some(uow)).await?;
                 Err(RepositoryError::Database("forced rollback".to_string()))
             })
@@ -311,11 +338,15 @@ async fn unit_of_work_rolls_back_on_closure_error() {
     // A UoW closure that succeeds commits the row.
     let committed_id = UserId::generate();
     let committed_user = sample_user(committed_id);
-    let db_for_commit = db.clone();
+    let url_for_commit = url.clone();
     let committed: Result<(), RepositoryError> = provider
         .run(move |uow| {
-            let inner_repo = PostgresUserRepository::new(db_for_commit);
-            Box::pin(async move { inner_repo.save(&committed_user, Some(uow)).await })
+            let url2 = url_for_commit.clone();
+            Box::pin(async move {
+                let inner_db = connect_fresh(&url2).await;
+                let inner_repo = PostgresUserRepository::new(inner_db);
+                inner_repo.save(&committed_user, Some(uow)).await
+            })
         })
         .await;
     committed.expect("commit");
