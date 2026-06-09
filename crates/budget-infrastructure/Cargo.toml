@@ -102,6 +102,18 @@ sqlx = { version = "0.8", default-features = false, features = [
 # (frontend-phase) wire, and for any opaque-blob handling at this boundary.
 base64 = "0.22"
 
+# The Plaid HTTP client (build step 8, SPEC §6). rustls (no system OpenSSL) +
+# JSON; version-locked to the 0.13 already in the tree (transitive via azure).
+# This is the ONLY direct Plaid network dependency; the sync engine + service
+# work against the domain `PlaidApi` port so tests run fully mocked (no live
+# Plaid call, SPEC §6).
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "http2",
+    "charset",
+    "json",
+] }
+
 # The MockDatabase driver (sea_orm::MockDatabase) is used only in unit tests.
 # Adding `mock` here enables it for the test build without touching the
 # production feature set.  NOTE: Cargo feature unification means `mock` will

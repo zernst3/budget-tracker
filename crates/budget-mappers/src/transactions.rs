@@ -17,12 +17,13 @@
 //!   - `date`: `Date` (`NaiveDate`) — same type; pass through
 //!   - `created_at / updated_at`: `DateTimeWithTimeZone` → `DateTime<Utc>` (`DOMAIN-7`)
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sea_orm::ActiveValue::Set;
 
 use budget_domain::enums::{IncomeKind, TransactionSource, TransactionStatus};
 use budget_domain::ids::{AccountId, CategoryId, MonthId, TransactionId, UserId};
 use budget_domain::money::Money;
+use budget_domain::plaid_api::PlaidTransaction;
 use budget_domain::transaction::Transaction;
 
 use budget_entities::transactions;
@@ -103,6 +104,35 @@ fn build_transaction(m: transactions::Model, amount: Money) -> Transaction {
 }
 
 // ---------------------------------------------------------------------------
+// The single Plaid sign-flip site (BUDGET-PLAID-SIGN-1)
+// ---------------------------------------------------------------------------
+
+/// Flip a raw Plaid amount into the internal signed convention, exactly once
+/// (`BUDGET-PLAID-SIGN-1`).
+///
+/// Plaid reports `amount > 0` for outflows (debits) and `amount < 0` for inflows
+/// (credits/refunds). The internal convention is negative = expense, positive =
+/// inflow, so the flip is a single negation. This is the ONE place the Plaid sign
+/// is interpreted; both [`plaid_model_to_domain`] and [`plaid_dto_to_domain`]
+/// route through it, and no downstream code re-interprets the Plaid sign.
+///
+/// The `debug_assert!` keys off `plaid_raw`'s sign as an INDEPENDENT signal: if
+/// Plaid ever reverses their convention the raw value's polarity changes, so the
+/// guard fires even though the negation stays mathematically correct. Zero rows
+/// (some pending) are exempt.
+fn flip_plaid_amount(plaid_raw: rust_decimal::Decimal) -> Money {
+    let internal_amount = Money::from_decimal(-plaid_raw);
+    debug_assert!(
+        plaid_raw.is_zero()
+            || (plaid_raw.is_sign_positive() && internal_amount.as_decimal().is_sign_negative())
+            || (plaid_raw.is_sign_negative() && internal_amount.as_decimal().is_sign_positive()),
+        "BUDGET-PLAID-SIGN-1 direction guard failed: plaid_raw={plaid_raw}, internal={:?}",
+        internal_amount.as_decimal()
+    );
+    internal_amount
+}
+
+// ---------------------------------------------------------------------------
 // Public mapper functions
 // ---------------------------------------------------------------------------
 
@@ -151,27 +181,58 @@ pub fn model_to_domain(m: transactions::Model) -> Result<Transaction, MapperErro
 /// read path once fallible aggregates are added.
 pub fn plaid_model_to_domain(m: transactions::Model) -> Result<Transaction, MapperError> {
     // `BUDGET-PLAID-SIGN-1`: Plaid positive-outflow → internal negative-expense.
-    // Negate once at this boundary.
-    let plaid_raw = m.amount;
-    let internal_amount = Money::from_decimal(-plaid_raw);
-
-    // Direction guard: after the flip a Plaid debit (plaid_raw > 0) must be
-    // negative internally, and a Plaid credit (plaid_raw < 0) must be positive
-    // internally.  This asserts against `plaid_raw`'s sign as an INDEPENDENT
-    // signal — if Plaid ever reverses their sign convention the raw value itself
-    // changes polarity, so this assert fires even though the negation is still
-    // mathematically correct.  Zero-amount rows (some pending) are exempt.
-    // In tests this panics on a direction regression; in prod it is a fast
-    // check that should never trigger.
-    debug_assert!(
-        plaid_raw.is_zero()
-            || (plaid_raw.is_sign_positive() && internal_amount.as_decimal().is_sign_negative())
-            || (plaid_raw.is_sign_negative() && internal_amount.as_decimal().is_sign_positive()),
-        "BUDGET-PLAID-SIGN-1 direction guard failed: plaid_raw={plaid_raw}, internal={:?}",
-        internal_amount.as_decimal()
-    );
-
+    // The single flip site is `flip_plaid_amount`.
+    let internal_amount = flip_plaid_amount(m.amount);
     Ok(build_transaction(m, internal_amount))
+}
+
+/// Translate a raw Plaid [`PlaidTransaction`] DTO directly into a domain
+/// [`Transaction`], normalizing the Plaid sign once (`BUDGET-PLAID-SIGN-1`).
+///
+/// This is the Plaid-ingest mapper boundary used by the sync engine (`SPEC §6`):
+/// the DTO carries Plaid's native data (positive = outflow) and this function
+/// produces a domain `Transaction` with the internal sign and the supplied
+/// context (the resolved `month_id`, optional `account_id`, `id`, `status`, and
+/// timestamps). Categorization is deferred: a freshly-`added` row lands
+/// `category_id = None` (uncategorized), so this function never sets a category.
+///
+/// `status` is decided by the caller from Plaid's `pending` flag (`SPEC §4.4`:
+/// pending excluded, settled included) and passed in, because the pending->settled
+/// transition is driven by the sync engine, not the mapper.
+///
+/// # Errors
+/// Currently infallible (the flip cannot fail); returns `Result` for the uniform
+/// mapper signature (`MAPPER-1`).
+#[allow(clippy::too_many_arguments)]
+pub fn plaid_dto_to_domain(
+    dto: &PlaidTransaction,
+    id: TransactionId,
+    user_id: UserId,
+    month_id: MonthId,
+    account_id: Option<AccountId>,
+    status: TransactionStatus,
+    now: DateTime<Utc>,
+) -> Result<Transaction, MapperError> {
+    let amount = flip_plaid_amount(dto.amount);
+    Ok(Transaction {
+        id,
+        user_id,
+        month_id,
+        // Plaid rows land uncategorized; the user assigns later (SPEC §6/§7).
+        category_id: None,
+        account_id,
+        date: dto.date,
+        amount,
+        description: dto.name.clone(),
+        source: TransactionSource::Plaid,
+        plaid_transaction_id: Some(dto.transaction_id.clone()),
+        status,
+        income_kind: None,
+        is_rollover: false,
+        is_fund_draw: false,
+        created_at: now,
+        updated_at: now,
+    })
 }
 
 /// Translate a domain [`Transaction`] into a `transactions` [`transactions::ActiveModel`].

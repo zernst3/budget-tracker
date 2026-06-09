@@ -21,6 +21,7 @@ use std::sync::Arc;
 use azure_core::credentials::TokenCredential;
 use azure_identity::ManagedIdentityCredential;
 use azure_security_keyvault_secrets::SecretClient;
+use azure_security_keyvault_secrets::models::SetSecretParameters;
 
 use async_trait::async_trait;
 use budget_domain::auth::{AuthError, SecretVault};
@@ -80,6 +81,30 @@ impl SecretVault for AzureKeyVault {
             // A secret with no value is an operational fault, not an empty secret;
             // fail safe rather than handing back an empty string.
             .ok_or_else(|| AuthError::SecretVault("secret has no value".to_owned()))
+    }
+
+    async fn set_secret(&self, name: &str, value: &str) -> Result<(), AuthError> {
+        // Store the Plaid access token (SPEC §6). The value is the secret; the
+        // DB only ever holds `name` (BUDGET-PLAID-TOKEN-VAULT-1). The value is
+        // moved into the request body and never logged.
+        let params = SetSecretParameters {
+            value: Some(value.to_owned()),
+            content_type: None,
+            secret_attributes: None,
+            tags: None,
+        };
+        let body = params
+            .try_into()
+            // A serialization fault carries no secret material (it is a structural
+            // error about the request shape, not the value).
+            .map_err(|e| AuthError::SecretVault(format!("set_secret body: {e}")))?;
+        self.client
+            .set_secret(name, body, None)
+            .await
+            // The Azure error never contains the secret value (transport/request
+            // error). Map to the typed fail-safe error.
+            .map_err(|e| AuthError::SecretVault(format!("set_secret: {e}")))?;
+        Ok(())
     }
 }
 

@@ -180,14 +180,16 @@ pub trait TotpService: Send + Sync {
     fn verify(&self, secret: &str, code: &str) -> Result<bool, AuthError>;
 }
 
-/// Port: a read-only secret vault (Azure Key Vault, `BUDGET-PLAID-TOKEN-VAULT-1`).
+/// Port: a secret vault (Azure Key Vault, `BUDGET-PLAID-TOKEN-VAULT-1`).
 ///
-/// Reads a secret by name/reference. Used for DB credentials and (build step 8)
-/// the Plaid access token, which is stored only as a Key Vault reference. The
-/// concrete managed-identity-authenticated client lives in
-/// `budget-infrastructure`. The trait is `async` because a vault read is a
-/// network call; it is declared with `async_trait` so it can be held as a trait
-/// object for DI (`SERVICE-DI-1`).
+/// Reads and writes secrets by name/reference. Used for DB credentials and
+/// (build step 8) the Plaid access token, which is **written** to the vault at
+/// exchange time and thereafter stored only as a Key Vault reference in the DB —
+/// the raw token never persists in a DB column or a log
+/// (`BUDGET-PLAID-TOKEN-VAULT-1`). The concrete managed-identity-authenticated
+/// client lives in `budget-infrastructure`. The trait is `async` because a vault
+/// operation is a network call; it is declared with `async_trait` so it can be
+/// held as a trait object for DI (`SERVICE-DI-1`).
 #[async_trait::async_trait]
 pub trait SecretVault: Send + Sync {
     /// Read the current value of the secret named `name`.
@@ -201,6 +203,18 @@ pub trait SecretVault: Send + Sync {
     /// [`AuthError::SecretVault`] if the vault is unreachable, the identity is
     /// denied, or the secret does not exist.
     async fn get_secret(&self, name: &str) -> Result<String, AuthError>;
+
+    /// Write `value` as the secret named `name`, creating or updating it.
+    ///
+    /// The Plaid exchange path calls this to store the freshly-exchanged
+    /// `access_token` (`SPEC §6`); the DB then only ever holds `name` (the
+    /// reference), never `value` (`BUDGET-PLAID-TOKEN-VAULT-1`). Fails safe and
+    /// never logs `value`.
+    ///
+    /// # Errors
+    /// [`AuthError::SecretVault`] if the vault is unreachable or the identity is
+    /// denied.
+    async fn set_secret(&self, name: &str, value: &str) -> Result<(), AuthError>;
 }
 
 /// Persistence for the [`WebauthnCredential`] aggregate (`REPO-1` /

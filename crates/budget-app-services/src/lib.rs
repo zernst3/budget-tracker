@@ -14,6 +14,7 @@ pub mod error;
 pub mod fund;
 pub mod income;
 pub mod month_lifecycle;
+pub mod plaid_sync;
 
 pub use auth::AuthService;
 pub use error::ServiceError;
@@ -23,3 +24,4 @@ pub use income::{
     IncomeSurplusRouting, SemimonthlyFixedExpectation,
 };
 pub use month_lifecycle::{MonthLifecycleService, net_leftover};
+pub use plaid_sync::PlaidSyncService;

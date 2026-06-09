@@ -24,6 +24,7 @@
 pub mod auth;
 pub mod conn;
 pub mod error;
+pub mod plaid;
 pub mod repositories;
 pub mod uow;
 pub mod upsert;
@@ -39,6 +40,11 @@ pub use repositories::transactions::PostgresTransactionRepository;
 pub use repositories::users::PostgresUserRepository;
 pub use repositories::webauthn_credentials::PostgresWebauthnCredentialRepository;
 pub use uow::{SeaOrmUow, SeaOrmUowProvider};
+
+// Plaid integration (build step 8, SPEC §6): the reqwest HTTP client + the
+// cursor-sync/reconcile engine. Both implement domain ports so the service layer
+// + tests work against abstractions (no live Plaid call in tests).
+pub use plaid::{HttpPlaidApi, PlaidCredentials, PlaidEnvironment, SeaOrmPlaidSyncEngine};
 
 // Auth subsystem (build step 7, BUDGET-AUTH-GATE-1): the concrete adapters of
 // the domain auth ports, the session store + cookie policy, and the AuthedUser

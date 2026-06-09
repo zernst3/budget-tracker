@@ -30,6 +30,7 @@ pub mod ids;
 pub mod money;
 pub mod month;
 pub mod paycheck_config;
+pub mod plaid_api;
 pub mod plaid_item;
 pub mod predicates;
 pub mod projections;
@@ -64,6 +65,10 @@ pub use ids::{
 pub use money::Money;
 pub use month::Month;
 pub use paycheck_config::PaycheckConfig;
+pub use plaid_api::{
+    AccessTokenExchange, LinkToken, LinkTokenRequest, PlaidAccount, PlaidApi, PlaidError,
+    PlaidProduct, PlaidSyncEngine, PlaidSyncPage, PlaidTransaction, SyncSummary,
+};
 pub use plaid_item::PlaidItem;
 pub use predicates::{
     FixedSettlement, counts_in_budget, counts_in_month_expense_remaining, fixed_category_spent,
