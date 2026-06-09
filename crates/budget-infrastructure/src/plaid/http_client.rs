@@ -74,6 +74,17 @@ impl HttpPlaidApi {
         }
     }
 
+    /// Build the client with a default `reqwest` client, so a caller that wires the
+    /// service (e.g. the server-function layer) does not need a direct `reqwest`
+    /// dependency. The default client uses the crate's configured TLS backend.
+    #[must_use]
+    pub fn with_default_client(
+        credentials: PlaidCredentials,
+        environment: PlaidEnvironment,
+    ) -> Self {
+        Self::new(Client::new(), credentials, environment)
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.environment.base_url())
     }

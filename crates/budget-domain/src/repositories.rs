@@ -216,6 +216,23 @@ pub trait TransactionRepository: Send + Sync {
     /// [`RepositoryError`] on any persistence failure.
     async fn list_for_month(&self, month_id: MonthId) -> Result<Vec<Transaction>, RepositoryError>;
 
+    /// The pending-triage inbox for a user (`SPEC §7`): every transaction with
+    /// `status = 'settled'` AND `category_id IS NULL` — settled bank charges that
+    /// have not yet been categorized.
+    ///
+    /// This is the "Pull -> Pending -> triage" inbox, NOT a Plaid `pending`
+    /// credit-card charge (`SPEC §4.4`): Plaid `pending` rows carry
+    /// `status = 'pending'` and are excluded by the `settled` filter, so they never
+    /// surface here. Ordered by date ascending so the oldest awaiting-categorization
+    /// charge is first. Scoped to `user_id` (`SPEC §9.1` defense in depth).
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure.
+    async fn list_pending_inbox(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<Transaction>, RepositoryError>;
+
     /// All transactions assigned to a category within a month — the input to the
     /// fixed-category spent predicate (`BUDGET-NO-DOUBLE-CHARGE-1`).
     ///

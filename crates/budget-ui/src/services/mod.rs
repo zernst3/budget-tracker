@@ -20,6 +20,7 @@ mod health;
 pub mod ledger;
 pub mod month_view;
 pub mod passkey;
+pub mod triage;
 
 // The AuthedUser gate (`BUDGET-AUTH-GATE-1`) is server-only: it extracts the
 // session + server state and loads the user. Its types are referenced only from
@@ -37,4 +38,8 @@ pub use month_view::{CategoryRowDto, MonthViewDto, ensure_month, get_month_view}
 pub use passkey::{
     finish_passkey_authentication, finish_passkey_registration, start_passkey_authentication,
     start_passkey_registration,
+};
+pub use triage::{
+    PendingRowDto, PullResultDto, TreatmentDto, TriageRequestDto, TriageResultDto,
+    get_pending_inbox, pull, triage_transaction,
 };

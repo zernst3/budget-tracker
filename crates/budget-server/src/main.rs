@@ -36,8 +36,12 @@ use sea_orm::{ConnectOptions, Database};
 
 use budget_infrastructure::auth::{SessionLayerConfig, build_session_layer};
 use budget_infrastructure::run_pending_migrations;
-use budget_ui::server_state::{AppState, MonthViewState};
+use budget_ui::server_state::{AppState, MonthViewState, TriageState};
 
+// The entrypoint is a linear wiring sequence (connections -> migrations -> state
+// -> router -> serve); splitting it would scatter the one-shot startup wiring
+// across helpers without making it clearer.
+#[allow(clippy::too_many_lines)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Non-verbose logging (SPEC §8: stay under the Log Analytics free tier). The
@@ -89,6 +93,43 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("connecting to the database (uow)")?;
 
+    // Connections for the BACKEND-3 Pull / Pending / triage server functions. Each
+    // repository + unit-of-work gets its own pool handle (the SeaORM `mock`-feature
+    // `Clone` caveat, as above).
+    let triage_txns_db = connect()
+        .await
+        .context("connecting to the database (triage transactions)")?;
+    let triage_funds_db = connect()
+        .await
+        .context("connecting to the database (triage funds)")?;
+    let triage_fund_budgets_db = connect()
+        .await
+        .context("connecting to the database (triage fund budgets)")?;
+    let triage_fund_uow_db = connect()
+        .await
+        .context("connecting to the database (triage fund uow)")?;
+    let triage_uow_db = connect()
+        .await
+        .context("connecting to the database (triage uow)")?;
+    let triage_plaid_items_db = connect()
+        .await
+        .context("connecting to the database (triage plaid items)")?;
+    let triage_plaid_months_db = connect()
+        .await
+        .context("connecting to the database (triage plaid months)")?;
+    let triage_plaid_users_db = connect()
+        .await
+        .context("connecting to the database (triage plaid users)")?;
+    let triage_plaid_txns_db = connect()
+        .await
+        .context("connecting to the database (triage plaid transactions)")?;
+    let triage_plaid_engine_uow_db = connect()
+        .await
+        .context("connecting to the database (triage plaid engine uow)")?;
+    let triage_plaid_sync_uow_db = connect()
+        .await
+        .context("connecting to the database (triage plaid sync uow)")?;
+
     // Apply pending schema migrations before serving any traffic (idempotent).
     run_pending_migrations(&db)
         .await
@@ -122,6 +163,24 @@ async fn main() -> anyhow::Result<()> {
     // Month-view state: repos + lifecycle service for the B4 server functions.
     let month_view_state =
         MonthViewState::from_connections(months_db, budgets_db, txns_db, funds_db, uow_db);
+
+    // Triage state: the Pull (Plaid sync) + Pending-inbox + atomic-triage services
+    // for the BACKEND-3 server functions. Plaid is wired only when the credentials +
+    // Key Vault URL are present in the environment (otherwise Pull 503s, SPEC §6).
+    let triage_state = TriageState::from_connections(
+        triage_txns_db,
+        triage_funds_db,
+        triage_fund_budgets_db,
+        triage_fund_uow_db,
+        triage_uow_db,
+        triage_plaid_items_db,
+        triage_plaid_months_db,
+        triage_plaid_users_db,
+        triage_plaid_txns_db,
+        triage_plaid_engine_uow_db,
+        triage_plaid_sync_uow_db,
+    )
+    .map_err(|e| anyhow::anyhow!("building the triage/plaid state: {e}"))?;
 
     // The bind address the `dx` CLI / Container Apps injects; localhost for a
     // bare `cargo run`.
@@ -162,6 +221,7 @@ async fn main() -> anyhow::Result<()> {
         // Layer order: session layer first (populates `Session` extension),
         // then state extensions. All three extensions are visible to server-
         // function handlers downstream.
+        .layer(Extension(triage_state))
         .layer(Extension(month_view_state))
         .layer(Extension(state))
         .layer(session_layer);

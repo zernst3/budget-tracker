@@ -701,6 +701,52 @@ mod transaction_repo {
     }
 
     #[tokio::test]
+    async fn list_pending_inbox_maps_settled_uncategorized_rows() {
+        // The triage inbox (SPEC §7): the query filters settled + category IS NULL
+        // in SQL. MockDatabase does not apply the WHERE clause, so this verifies the
+        // statement executes and the (uncategorized, settled) rows map through to
+        // domain transactions with no category — the shape the triage UI consumes.
+        let user_id = Uuid::new_v4();
+        let t1 = sample_txn_model(
+            Uuid::new_v4(),
+            user_id,
+            Uuid::new_v4(),
+            None, // uncategorized
+            Decimal::new(-4250, 2),
+            transactions::TransactionStatus::Settled,
+            false,
+        );
+        let t2 = sample_txn_model(
+            Uuid::new_v4(),
+            user_id,
+            Uuid::new_v4(),
+            None,
+            Decimal::new(-999, 2),
+            transactions::TransactionStatus::Settled,
+            false,
+        );
+        let db = MockDatabase::new(DbBackend::Postgres)
+            .append_query_results([[t1, t2]])
+            .into_connection();
+        let repo = PostgresTransactionRepository::new(db);
+        let result = repo
+            .list_pending_inbox(UserId::new(user_id))
+            .await
+            .expect("no error");
+        assert_eq!(result.len(), 2);
+        assert!(
+            result.iter().all(|t| t.category_id.is_none()),
+            "inbox rows are uncategorized"
+        );
+        assert!(
+            result
+                .iter()
+                .all(|t| t.status == budget_domain::enums::TransactionStatus::Settled),
+            "inbox rows are settled (a Plaid pending charge would be excluded by the SQL filter)"
+        );
+    }
+
+    #[tokio::test]
     async fn list_for_category_in_month_returns_rows() {
         let month_id = Uuid::new_v4();
         let cat_id = Uuid::new_v4();

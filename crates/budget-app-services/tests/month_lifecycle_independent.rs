@@ -305,6 +305,13 @@ impl TransactionRepository for MemTxnRepo {
             .collect())
     }
 
+    async fn list_pending_inbox(
+        &self,
+        _user_id: UserId,
+    ) -> Result<Vec<Transaction>, RepositoryError> {
+        Ok(vec![])
+    }
+
     async fn list_for_category_in_month(
         &self,
         month_id: MonthId,

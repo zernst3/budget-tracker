@@ -19,6 +19,7 @@ pub mod income;
 pub mod month_lifecycle;
 pub mod onboarding;
 pub mod plaid_sync;
+pub mod triage;
 
 pub use auth::AuthService;
 pub use config::DeficitFinancingConfig;
@@ -36,3 +37,4 @@ pub use onboarding::{
     OnboardingService, opening_charge_id, opening_other_id,
 };
 pub use plaid_sync::PlaidSyncService;
+pub use triage::{PendingTransaction, Treatment, TriageInput, TriageOutcome, TriageService};

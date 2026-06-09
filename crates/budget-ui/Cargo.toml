@@ -40,6 +40,8 @@ server = [
     "dep:tower-sessions",
     "dep:tokio",
     "dep:tracing",
+    "dep:uuid",
+    "dep:chrono-tz",
 ]
 # The wasm32 hydrating client bundle. `dx serve` / the deploy build selects this
 # for the browser target.
@@ -97,6 +99,12 @@ tracing = { workspace = true, optional = true }
 # store + AuthedUser extractor resolve against.
 sea-orm = { workspace = true, optional = true }
 tower-sessions = { version = "0.14", optional = true }
+
+# Server-only: the triage server functions parse wire UUIDs into domain newtypes
+# and resolve the Plaid reconcile-window date in the home timezone (D2). Both stay
+# out of the wasm graph (the wasm uuid dep below is a separate target-cfg entry).
+uuid = { workspace = true, optional = true }
+chrono-tz = { version = "0.10", optional = true }
 
 # RUST-WASM-GETRANDOM-1: the dependency graph (uuid in budget-domain, ahash via
 # dioxus, etc.) transitively includes getrandom, whose wasm32 build fails to

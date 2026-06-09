@@ -128,6 +128,16 @@ impl FundService {
         }
     }
 
+    /// The fund repository handle (`SERVICE-DI-1`) — exposed so an orchestrating
+    /// service (e.g. the triage flow) can persist a [`Fund`] /
+    /// [`RepaymentObligation`] that [`Self::prepare_existing_fund_draw`] /
+    /// [`Self::prepare_existing_buffer_finance`] built, inside ITS own unit of work.
+    /// The money math stays here; only the persistence handle is shared.
+    #[must_use]
+    pub fn fund_repo(&self) -> Arc<dyn FundRepository> {
+        Arc::clone(&self.funds)
+    }
+
     // -----------------------------------------------------------------------
     // 1. Fund contributions (BUDGET-FUND-EARMARK-1 / D6)
     // -----------------------------------------------------------------------
@@ -721,7 +731,114 @@ impl FundService {
     }
 
     // -----------------------------------------------------------------------
-    // 4. Buffer health — advisory only (SPEC §4.9)
+    // 4. Triage treatments — apply a §4.9 path to an EXISTING settled
+    //    transaction WITHIN a caller-provided unit of work (SPEC §7).
+    //
+    //    These are the money-logic core the pending-triage flow reuses
+    //    (BACKEND-3): the triaged row already exists (a settled Plaid charge),
+    //    so unlike the create-path large-purchase methods above these MUTATE the
+    //    existing transaction rather than minting a new one — but the fund
+    //    arithmetic + obligation machinery are IDENTICAL (no duplicated money
+    //    math). Each takes the caller's `&dyn UnitOfWork` so the category/comment
+    //    edit and the treatment commit ATOMICALLY in ONE transaction
+    //    (SERVICE-TX-1) driven by the triage service.
+    // -----------------------------------------------------------------------
+
+    /// Treatment (a) money math: turn an existing settled transaction into a FUND
+    /// DRAW from a savings/surplus fund (`SPEC §7` / `§4.9`).
+    ///
+    /// Loads + validates the fund (DomainError-fallible), then mutates `txn` to a
+    /// fund draw (`is_fund_draw = true` — EXCLUDED from the rolling-Other net,
+    /// `BUDGET-NO-DOUBLE-CHARGE-1` / D6 Model A: the money was already expensed by
+    /// the prior contributions that built the fund) and returns the
+    /// balance-decremented [`Fund`]. Persistence is the caller's job (the triage
+    /// service enlists both `txn` and the returned fund in its unit of work,
+    /// `SERVICE-TX-1`). This is the SAME draw arithmetic as
+    /// [`Self::draw_through_surplus`] / [`Self::tag_sinking_payout`], factored so the
+    /// triage flow reuses it without duplicating the money math.
+    ///
+    /// # Errors
+    /// [`DomainError`] if the fund is absent or on any persistence read failure.
+    pub async fn prepare_existing_fund_draw(
+        &self,
+        fund_id: FundId,
+        txn: &mut Transaction,
+        now: DateTime<Utc>,
+    ) -> Result<Fund, DomainError> {
+        let mut fund = self.load_fund(fund_id).await?;
+        // The earmarked dollars were already counted when contributed; this draw is
+        // not re-charged against the month (BUDGET-NO-DOUBLE-CHARGE-1).
+        txn.is_fund_draw = true;
+        txn.updated_at = now;
+        fund.balance -= txn.amount.abs();
+        Ok(fund)
+    }
+
+    /// Treatment (b) money math: turn an existing settled transaction into a
+    /// BUFFER-FINANCED purchase amortized over `months` (`SPEC §7` / `§4.9` D7).
+    ///
+    /// Loads + validates the buffer fund (DomainError-fallible), draws it down by
+    /// the full price to front the cash, leaves `txn` as the full-price TRACKING row
+    /// (`is_fund_draw = false`, excluded from the month budget via its obligation,
+    /// D7 — zero net month impact), and builds a [`RepaymentObligation`] with
+    /// `installment_amount = price / months` (final installment absorbs the rounding
+    /// remainder so the sum is exact — same as [`Self::buffer_finance`]). Returns the
+    /// balance-decremented fund and the obligation; persistence is the caller's job
+    /// (enlisted in the triage unit of work, `SERVICE-TX-1`). The money math is NOT
+    /// duplicated — it is the same as the buffer-financed large-purchase path.
+    ///
+    /// # Errors
+    /// [`DomainError`] if the fund is absent, is not a buffer
+    /// (`compulsory_repayment = false`), `months` is not positive, or on any
+    /// persistence read failure.
+    pub async fn prepare_existing_buffer_finance(
+        &self,
+        fund_id: FundId,
+        txn: &mut Transaction,
+        months: i32,
+        now: DateTime<Utc>,
+    ) -> Result<(Fund, RepaymentObligation), DomainError> {
+        if months <= 0 {
+            return Err(DomainError::Invariant(
+                "buffer-financed repayment must span at least one month".to_owned(),
+            ));
+        }
+        let mut fund = self.load_fund(fund_id).await?;
+        if !fund.compulsory_repayment {
+            return Err(DomainError::Invariant(
+                "spread_over_months requires a buffer fund (compulsory_repayment=true)".to_owned(),
+            ));
+        }
+        let price = txn.amount.abs();
+        // The buffer fronts the cash now; the installments restore it (D7). The
+        // tracking row stays is_fund_draw=false and is excluded via its obligation.
+        fund.balance -= price;
+        txn.updated_at = now;
+
+        // installment = price / months; the final installment absorbs the rounding
+        // remainder so the sum is exact (mirrors buffer_finance, D7).
+        let months_u = u32::try_from(months).unwrap_or(1);
+        let installment = price.divide_into(months_u);
+
+        let obligation = RepaymentObligation {
+            id: RepaymentObligationId::generate(),
+            user_id: txn.user_id,
+            fund_id,
+            source: ObligationSource::LargePurchase,
+            transaction_id: Some(txn.id),
+            origin_month_id: None,
+            total_amount: price,
+            remaining_amount: price,
+            installment_amount: installment,
+            months_remaining: months,
+            status: ObligationStatus::Active,
+            created_at: now,
+        };
+        Ok((fund, obligation))
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. Buffer health — advisory only (SPEC §4.9)
     // -----------------------------------------------------------------------
 
     /// Compute the advisory buffer-health verdict for `fund` (`SPEC §4.9`).

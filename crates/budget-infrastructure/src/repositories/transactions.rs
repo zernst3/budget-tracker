@@ -20,7 +20,7 @@ use sea_orm::{
 use uuid::Uuid;
 
 use budget_domain::RepositoryError;
-use budget_domain::ids::{CategoryId, MonthId, TransactionId};
+use budget_domain::ids::{CategoryId, MonthId, TransactionId, UserId};
 use budget_domain::money::Money;
 use budget_domain::projections::{CategorySpent, MonthNet};
 use budget_domain::repositories::TransactionRepository;
@@ -90,6 +90,25 @@ impl TransactionRepository for PostgresTransactionRepository {
     async fn list_for_month(&self, month_id: MonthId) -> Result<Vec<Transaction>, RepositoryError> {
         let models = transactions::Entity::find()
             .filter(transactions::Column::MonthId.eq(month_id.value()))
+            .order_by_asc(transactions::Column::Date)
+            .all(&self.db)
+            .await
+            .map_err(map_db_err)?;
+        Self::map_txns(models)
+    }
+
+    async fn list_pending_inbox(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<Transaction>, RepositoryError> {
+        // The triage inbox (SPEC §7): settled + uncategorized. The `Settled`
+        // status filter is what keeps Plaid `pending` charges (status='pending')
+        // out of the inbox (SPEC §4.4) — they are excluded by construction, not by
+        // a separate guard. Scoped to user_id (SPEC §9.1).
+        let models = transactions::Entity::find()
+            .filter(transactions::Column::UserId.eq(user_id.value()))
+            .filter(transactions::Column::Status.eq(transactions::TransactionStatus::Settled))
+            .filter(transactions::Column::CategoryId.is_null())
             .order_by_asc(transactions::Column::Date)
             .all(&self.db)
             .await

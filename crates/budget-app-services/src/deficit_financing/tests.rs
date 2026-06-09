@@ -373,6 +373,13 @@ impl TransactionRepository for FakeTransactionRepo {
     async fn list_for_month(&self, month_id: MonthId) -> Result<Vec<Transaction>, RepositoryError> {
         Ok(self.for_month(month_id))
     }
+    async fn list_pending_inbox(
+        &self,
+        _user_id: UserId,
+    ) -> Result<Vec<Transaction>, RepositoryError> {
+        Ok(vec![])
+    }
+
     async fn list_for_category_in_month(
         &self,
         month_id: MonthId,

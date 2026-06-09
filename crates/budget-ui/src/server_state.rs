@@ -257,3 +257,202 @@ impl MonthViewState {
         Ok(state)
     }
 }
+
+// ---------------------------------------------------------------------------
+// TriageState — the server state for the BACKEND-3 Pull / Pending / triage fns
+// ---------------------------------------------------------------------------
+
+/// Server state for the Pull -> Pending -> triage server functions
+/// (`SPEC §7`, BACKEND-3): the manual Plaid pull, the triage inbox read, and the
+/// atomic triage write.
+///
+/// Holds the [`PlaidSyncService`] (the manual Pull, `SPEC §6`) and the
+/// [`TriageService`] (the inbox + atomic triage, `SPEC §7`). The
+/// [`PlaidSyncService`] is OPTIONAL: it requires the Plaid credentials + Key Vault
+/// URL, which are absent in a local dev run without bank linking. When `None`, the
+/// Pull server function returns a clear `503` (the inbox + triage still work over
+/// whatever rows already exist). `Arc`-backed so cloning into the Axum `Extension`
+/// is cheap.
+#[derive(Clone)]
+pub struct TriageState {
+    /// The triage use case: the inbox read + the atomic triage write (`SPEC §7`).
+    pub triage: Arc<budget_app_services::TriageService>,
+    /// The Plaid sync use case driving the manual Pull (`SPEC §6`). `None` when
+    /// Plaid is not configured (no credentials / vault) — the Pull fn then 503s.
+    pub plaid: Option<Arc<budget_app_services::PlaidSyncService>>,
+}
+
+impl TriageState {
+    /// Assemble from collaborators (used directly by tests injecting fakes).
+    #[must_use]
+    pub fn new(
+        triage: Arc<budget_app_services::TriageService>,
+        plaid: Option<Arc<budget_app_services::PlaidSyncService>>,
+    ) -> Self {
+        Self { triage, plaid }
+    }
+
+    /// Wire the production state from independent live `SeaORM` connections.
+    ///
+    /// The triage service is always wired. The Plaid sync service is wired only when
+    /// the Plaid credentials (`PLAID_CLIENT_ID` / `PLAID_SECRET`) AND the Key Vault
+    /// URL (`KEY_VAULT_URL`) are present in the environment; otherwise it is `None`
+    /// and the Pull server function returns `503` (bank linking is a deploy-time
+    /// concern, `SPEC §6`/`§12`). Each component takes its own connection (the
+    /// `SeaORM` `mock`-feature `Clone` caveat, as elsewhere in this module).
+    ///
+    /// # Errors
+    /// Returns the Key Vault construction error string if `KEY_VAULT_URL` is set but
+    /// invalid.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub fn from_connections(
+        transactions_db: DatabaseConnection,
+        funds_db: DatabaseConnection,
+        fund_budgets_db: DatabaseConnection,
+        fund_uow_db: DatabaseConnection,
+        triage_uow_db: DatabaseConnection,
+        plaid_items_db: DatabaseConnection,
+        plaid_months_db: DatabaseConnection,
+        plaid_users_db: DatabaseConnection,
+        plaid_txns_db: DatabaseConnection,
+        plaid_engine_uow_db: DatabaseConnection,
+        plaid_sync_uow_db: DatabaseConnection,
+    ) -> Result<Self, String> {
+        use budget_app_services::{FundService, TriageService};
+        use budget_domain::repositories::{
+            BudgetRepository, FundRepository, TransactionRepository,
+        };
+        use budget_domain::uow::UowProvider;
+        use budget_infrastructure::{
+            PostgresBudgetRepository, PostgresFundRepository, PostgresTransactionRepository,
+            SeaOrmUowProvider,
+        };
+
+        // FundService (the money-math home the triage treatments reuse).
+        let fund_txns: Arc<dyn TransactionRepository> =
+            Arc::new(PostgresTransactionRepository::new(transactions_db));
+        let funds: Arc<dyn FundRepository> = Arc::new(PostgresFundRepository::new(funds_db));
+        let fund_budgets: Arc<dyn BudgetRepository> =
+            Arc::new(PostgresBudgetRepository::new(fund_budgets_db));
+        let fund_uow: Arc<dyn UowProvider> = Arc::new(SeaOrmUowProvider::new(fund_uow_db));
+        let fund_service = Arc::new(FundService::new(
+            Arc::clone(&funds),
+            Arc::clone(&fund_txns),
+            fund_budgets,
+            fund_uow,
+        ));
+
+        // The triage service's own transaction repo + unit of work (its atomic
+        // category/comment + treatment write).
+        let triage_txns: Arc<dyn TransactionRepository> =
+            Arc::new(PostgresTransactionRepository::new(plaid_txns_db));
+        let triage_uow: Arc<dyn UowProvider> = Arc::new(SeaOrmUowProvider::new(triage_uow_db));
+        let triage = Arc::new(TriageService::new(
+            Arc::clone(&triage_txns),
+            Arc::clone(&fund_service),
+            triage_uow,
+        ));
+
+        // Plaid is wired only when configured.
+        let plaid = Self::wire_plaid(
+            plaid_items_db,
+            plaid_months_db,
+            plaid_users_db,
+            plaid_engine_uow_db,
+            plaid_sync_uow_db,
+            triage_txns,
+        )?;
+
+        Ok(Self::new(triage, plaid))
+    }
+
+    /// Wire the [`PlaidSyncService`] iff the credentials + vault env vars are
+    /// present; otherwise `Ok(None)`.
+    fn wire_plaid(
+        plaid_items_db: DatabaseConnection,
+        plaid_months_db: DatabaseConnection,
+        plaid_users_db: DatabaseConnection,
+        plaid_engine_uow_db: DatabaseConnection,
+        plaid_sync_uow_db: DatabaseConnection,
+        plaid_txns: Arc<dyn budget_domain::repositories::TransactionRepository>,
+    ) -> Result<Option<Arc<budget_app_services::PlaidSyncService>>, String> {
+        use budget_app_services::PlaidSyncService;
+        use budget_domain::auth::SecretVault;
+        use budget_domain::plaid_api::{PlaidApi, PlaidSyncEngine};
+        use budget_domain::repositories::{MonthRepository, PlaidItemRepository, UserRepository};
+        use budget_domain::uow::UowProvider;
+        use budget_infrastructure::{
+            AzureKeyVault, HttpPlaidApi, PlaidCredentials, PlaidEnvironment,
+            PostgresMonthRepository, PostgresPlaidItemRepository, PostgresUserRepository,
+            SeaOrmPlaidSyncEngine, SeaOrmUowProvider,
+        };
+
+        let (Ok(client_id), Ok(secret), Ok(vault_url)) = (
+            std::env::var("PLAID_CLIENT_ID"),
+            std::env::var("PLAID_SECRET"),
+            std::env::var("KEY_VAULT_URL"),
+        ) else {
+            // Not configured: the Pull server function will 503. The inbox + triage
+            // still operate over existing rows.
+            return Ok(None);
+        };
+
+        let environment = if std::env::var("PLAID_ENV").as_deref() == Ok("production") {
+            PlaidEnvironment::Production
+        } else {
+            PlaidEnvironment::Sandbox
+        };
+        let plaid_api: Arc<dyn PlaidApi> = Arc::new(HttpPlaidApi::with_default_client(
+            PlaidCredentials { client_id, secret },
+            environment,
+        ));
+
+        let plaid_items: Arc<dyn PlaidItemRepository> =
+            Arc::new(PostgresPlaidItemRepository::new(plaid_items_db));
+        let plaid_months: Arc<dyn MonthRepository> =
+            Arc::new(PostgresMonthRepository::new(plaid_months_db));
+        let plaid_users: Arc<dyn UserRepository> =
+            Arc::new(PostgresUserRepository::new(plaid_users_db));
+        let engine_uow: Arc<dyn UowProvider> =
+            Arc::new(SeaOrmUowProvider::new(plaid_engine_uow_db));
+        let sync_uow: Arc<dyn UowProvider> = Arc::new(SeaOrmUowProvider::new(plaid_sync_uow_db));
+
+        let engine: Arc<dyn PlaidSyncEngine> = Arc::new(SeaOrmPlaidSyncEngine::new(
+            Arc::clone(&plaid_api),
+            plaid_txns,
+            Arc::clone(&plaid_months),
+            Arc::clone(&plaid_items),
+            engine_uow,
+        ));
+        let vault: Arc<dyn SecretVault> =
+            Arc::new(AzureKeyVault::new(&vault_url).map_err(|e| e.to_string())?);
+
+        Ok(Some(Arc::new(PlaidSyncService::new(
+            plaid_api,
+            engine,
+            vault,
+            plaid_items,
+            plaid_users,
+            sync_uow,
+        ))))
+    }
+
+    /// Extract the `TriageState` from the current server-function request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `500` error if the extension is absent (wiring fault in `main.rs`).
+    pub async fn extract() -> Result<Self, dioxus::prelude::ServerFnError> {
+        use dioxus::fullstack::FullstackContext;
+        use dioxus::fullstack::axum::Extension;
+
+        let Extension(state) = FullstackContext::extract::<Extension<Self>, _>()
+            .await
+            .map_err(|_| dioxus::prelude::ServerFnError::ServerError {
+                message: "triage state unavailable (wiring fault)".to_owned(),
+                code: 500,
+                details: None,
+            })?;
+        Ok(state)
+    }
+}
