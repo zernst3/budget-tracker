@@ -71,7 +71,8 @@ pub use plaid_api::{
 };
 pub use plaid_item::PlaidItem;
 pub use predicates::{
-    FixedSettlement, counts_in_budget, counts_in_month_expense_remaining, fixed_category_spent,
+    FixedSettlement, counts_in_budget, counts_in_month_expense_remaining, envelope_category_spent,
+    fixed_category_spent,
 };
 pub use projections::{CategorySpent, MonthNet};
 pub use repayment_obligation::RepaymentObligation;

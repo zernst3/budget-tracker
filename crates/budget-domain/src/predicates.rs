@@ -12,7 +12,8 @@
 //! service) means the rule is a compile-checked, test-covered domain fact rather
 //! than an inline filter repeated per query.
 
-use crate::enums::TransactionStatus;
+use crate::category::Category;
+use crate::enums::{CategoryGrp, TransactionStatus};
 use crate::ids::{CategoryId, TransactionId};
 use crate::money::Money;
 use crate::transaction::Transaction;
@@ -139,6 +140,51 @@ pub fn counts_in_month_expense_remaining(
         && !txn.is_income()
         && !txn.is_fund_draw
         && !buffer_financed_txn_ids.contains(&txn.id)
+}
+
+/// `BUDGET-NO-DOUBLE-CHARGE-1` / `SPEC §4.5` — the per-category envelope spent
+/// for the month, given the signed sum of that category's budget-counting
+/// transactions.
+///
+/// This is the single place the envelope-summary (`SPEC §7`) decides a
+/// category's displayed spent. It lifts the two-line classification out of the
+/// server function so the rule is a tested domain fact, not inline UI logic:
+///
+///   - A **fixed** category (`CategoryGrp::Fixed`) uses
+///     [`fixed_category_spent`]: while UNSETTLED its spent is the budgeted
+///     placeholder (`-amount`, an outflow); once SETTLED its spent is the real
+///     transaction sum. Settlement is proxied here by "has at least one
+///     budget-counting transaction" (`counting_sum != ZERO`), because the SQL
+///     aggregate that produces `counting_sum` already applied the
+///     `BUDGET-STATUS-DRIVES-INCLUSION-1` filter, so a non-zero sum means a real
+///     counting charge has landed. (A genuine $0.00 settled charge is
+///     indistinguishable from "no charge" at this granularity and stays on the
+///     placeholder — the conservative read-only choice; a manual "mark settled"
+///     button, `SPEC §4.2`, is the precise override and is not part of this read.)
+///   - A **discretionary** category uses the raw transaction sum (no
+///     placeholder; you only ever spent what you spent).
+///
+/// `counting_sum` is the signed sum (negative = outflow) of the category's
+/// settled + expected transactions in the month (the
+/// [`crate::projections::CategorySpent::spent`] value); the rollover bucket's
+/// `counting_sum` is the rolling-Other balance and is returned verbatim (it is a
+/// discretionary-style raw sum, never a placeholder).
+#[must_use]
+pub fn envelope_category_spent(category: &Category, counting_sum: Money) -> Money {
+    // The rollover bucket is never a fixed placeholder: its spent IS the rolling
+    // Other balance (the signed sum of its line items), returned as-is.
+    if category.is_rollover_bucket || category.grp == CategoryGrp::Discretionary {
+        return counting_sum;
+    }
+    // Fixed category: settled ? sum : placeholder (BUDGET-NO-DOUBLE-CHARGE-1).
+    let settlement = if counting_sum == Money::ZERO {
+        FixedSettlement::Unsettled
+    } else {
+        FixedSettlement::Settled
+    };
+    // Placeholder = the budgeted amount as an outflow (negative).
+    let placeholder = -category.amount;
+    fixed_category_spent(settlement, placeholder, counting_sum)
 }
 
 #[cfg(test)]
@@ -284,5 +330,69 @@ mod tests {
             !counts_in_month_expense_remaining(&placeholder, &[], &[]),
             "a matched expected placeholder is excluded (BUDGET-SETTLE-ON-MATCH-1)"
         );
+    }
+
+    // -- envelope_category_spent (SPEC §4.5 / §7) --------------------------
+
+    /// A category fixture for the envelope tests.
+    fn category(grp: CategoryGrp, amount: Money, is_rollover_bucket: bool) -> Category {
+        use crate::enums::Cadence;
+        use crate::ids::{BudgetId, CategoryId, CategoryKey};
+
+        Category {
+            id: CategoryId::generate(),
+            budget_id: BudgetId::generate(),
+            category_key: CategoryKey::generate(),
+            name: "cat".to_owned(),
+            amount,
+            grp,
+            settle_type: None,
+            expected_bills: None,
+            is_rollover_bucket,
+            cadence: Cadence::Monthly,
+            period_months: None,
+            fund_balance: Money::ZERO,
+            next_due_date: None,
+            sort_order: 0,
+        }
+    }
+
+    #[test]
+    fn envelope_fixed_unsettled_uses_placeholder_not_sum() {
+        // No counting transactions yet -> spent == the budgeted placeholder
+        // (-amount), NEVER the placeholder plus any stray sum.
+        let cat = category(CategoryGrp::Fixed, Money::from_minor(200_000), false); // $2000 rent
+        let spent = envelope_category_spent(&cat, Money::ZERO);
+        assert_eq!(spent, Money::from_minor(-200_000));
+    }
+
+    #[test]
+    fn envelope_fixed_settled_uses_real_sum_not_placeholder_plus_sum() {
+        // A real charge landed (non-zero counting sum) -> spent is the real sum,
+        // and is provably NOT placeholder + sum (the double-charge bug).
+        let cat = category(CategoryGrp::Fixed, Money::from_minor(200_000), false);
+        let real = Money::from_minor(-201_500); // $2015 actual rent
+        let spent = envelope_category_spent(&cat, real);
+        assert_eq!(spent, real);
+        assert_ne!(spent, Money::from_minor(-200_000) + real);
+    }
+
+    #[test]
+    fn envelope_discretionary_is_the_raw_sum() {
+        // Discretionary never uses a placeholder: spent is exactly what was spent.
+        let cat = category(CategoryGrp::Discretionary, Money::from_minor(50_000), false);
+        let sum = Money::from_minor(-31_277);
+        assert_eq!(envelope_category_spent(&cat, sum), sum);
+        // Zero spend on a discretionary category is zero, not the budget.
+        assert_eq!(envelope_category_spent(&cat, Money::ZERO), Money::ZERO);
+    }
+
+    #[test]
+    fn envelope_rollover_bucket_returns_balance_verbatim_even_if_fixed_grp() {
+        // The rollover bucket's spent IS the rolling-Other balance — never a
+        // placeholder, even if its grp were Fixed.
+        let cat = category(CategoryGrp::Fixed, Money::from_minor(0), true);
+        let other_balance = Money::from_minor(21_200); // +$212 carryover
+        assert_eq!(envelope_category_spent(&cat, other_balance), other_balance);
     }
 }
