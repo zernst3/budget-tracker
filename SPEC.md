@@ -231,10 +231,18 @@ Two mechanisms for large expenses (mirror images around the purchase date):
 - **`surplus`**: tappable, `compulsory_repayment=false`, saved toward a specific planned purchase.
 - (`sinking`, §4.7: auto-accrues toward scheduled recurring bills — same fund family.)
 
-**Kept LEAN on purpose:** Zach dislikes idle cash — anything ABOVE the buffer's `target_balance` he'd
-rather have in the market. So repayment restores TO target, and the app should **flag** when the buffer
-is above target (excess to invest, externally) or below target with outstanding obligations (don't
-stack another large draw). This is a **judgment AID, not enforcement** — he's financially literate
+**Buffer is UNTRACKED (clarified 2026-06-09 — see §12).** The buffer (Zach's rotating ~$15k
+emergency/overflow reserve) has **no bearing on budget math**: the app does **not** track or display its
+dollar balance and never subtracts it from free-to-spend. It is the real-world bank-account source that
+fronts buffer-financed purchases and deficit financing. `funds.kind='buffer'` exists only to **anchor
+`repayment_obligations`**. The earlier `target_balance` / buffer-health-flagging elaboration below is
+**out of V1 scope** — kept for historical context, not built. **Savings / sinking / surplus funds, by
+contrast, ARE tracked** (balances displayed), and contributions into them are Other-bucket expenses (D6).
+
+*(Historical, NOT built in V1):* Zach dislikes idle cash — anything ABOVE the buffer's `target_balance`
+he'd rather have in the market. So repayment restores TO target, and the app should **flag** when the
+buffer is above target (excess to invest, externally) or below target with outstanding obligations
+(don't stack another large draw). This is a **judgment AID, not enforcement** — he's financially literate
 enough to know a $2,000 purchase is fine normally but unwise right after an $8,000 surgery; the app
 surfaces buffer health + outstanding repayment obligations so his judgment has the data. It does NOT
 block.
@@ -327,6 +335,8 @@ transactions
   plaid_transaction_id? UNIQUE,   -- dedup
   status ('pending'|'settled'|'expected'),  -- 'expected'=manual placeholder, COUNTS in budget (§4.10);
                                             -- 'pending'=Plaid-seen-unsettled, EXCLUDED (§4.4)
+  matched_transaction_id→transactions?,     -- D9/§4.10: the real txn that settled this 'expected' placeholder
+                                            -- (set on the placeholder row). Linked once; reversible on Plaid 'removed'
   is_rollover bool,           -- system-generated 1st-of-month line item
   created_at, updated_at
 
@@ -338,15 +348,18 @@ funds                         -- §4.9: buffer/emergency (compulsory-repay) + de
   compulsory_repayment bool,  -- true = buffer, false = surplus
   created_at
 
-repayment_obligations         -- created when the buffer funds a large purchase ("pay off in X months")
+repayment_obligations         -- created when the buffer funds a large purchase OR a deficit is financed (§4.9, D7/D9)
   id, user_id→users,
   fund_id→funds,              -- the buffer being repaid
-  transaction_id→transactions,-- the large purchase (marked spent in full at purchase)
+  transaction_id→transactions?,-- the large purchase (marked spent in full at purchase); NULL for deficit financing (D9)
+  source ('large_purchase' | 'deficit'),  -- D9: deficit financing reuses this table with no single source txn
+  origin_month_id→months?,    -- D9: the closed month whose deficit was financed (NULL for large_purchase)
   total_amount, remaining_amount,
   installment_amount, months_remaining,
   status ('active' | 'paid'), created_at
   -- repayment installments = compulsory monthly budget expenses flowing back into the buffer until paid
   -- a large-purchase txn settles as: pay_in_full | pay_through_surplus(fund_id) | buffer_financed(→obligation)
+  -- D9 deficit financing: principal = the financed deficit; next month's Other absorbs only installment 1, not the whole deficit
 ```
 
 Computed (query/materialize, not stored):
@@ -540,6 +553,38 @@ in `CONVENTIONS.md` (the Camerata-emitted ruleset).
   transaction posts for tracking but does not hit the month's budget; it is offset by the buffer draw
   (a fund-draw fronting the cash). The `repayment_obligation`'s monthly installments **are** the
   month-budget expenses, flowing back into the buffer until `remaining = 0`.
+- **D9 — Deficit financing: a large monthly deficit may be amortized over months, electively
+  (`BUDGET-DEFICIT-FINANCING-1`): RESOLVED 2026-06-09.** Default behavior is unchanged: a month's net
+  deficit rolls forward in full as a negative carry into next month's rolling Other (§4.3), tracked as
+  the normal next-month Other expense. **New option:** when a closed month's deficit exceeds **75% of
+  the next month's Other budget**, the app *offers* (does not force) converting that deficit into a
+  **self-repayment obligation** amortized over N months — the **same `repayment_obligations` machinery
+  as a buffer-financed large purchase (D7/§4.9)**, except the principal is an **accumulated deficit**
+  (many small expenses that summed into one large hit) rather than one purchase transaction. Choosing it
+  means next month's Other absorbs only the first installment instead of the whole deficit; the
+  remaining installments are compulsory month-budget expenses in the following months until
+  `remaining = 0`. It is **elective per occurrence** (the threshold only surfaces the option); below the
+  threshold, or if declined, the deficit simply rolls in full per §4.3. The 75% threshold is a config
+  value.
+- **Savings funds vs. the buffer — RESOLVED 2026-06-09 (was the open `savings`-routing item).** These
+  are two **distinct** things, on opposite sides of the tracked/untracked line:
+  - The **buffer** (Zach's rotating ~$15k emergency/overflow reserve) is an **untracked external pool**
+    with **no bearing on budget math** — the app does **not** track or display its dollar balance, and
+    it is never subtracted from free-to-spend. It is purely the real-world bank-account source that
+    fronts buffer-financed purchases (D7) and deficit financing (D9). `funds.kind='buffer'` exists only
+    to **anchor `repayment_obligations`**, not to surface a balance. (Supersedes the §4.9
+    `target_balance` / buffer-health-flagging elaboration: that is out of V1 scope — the buffer is
+    informational/untracked, not a budget figure.)
+  - **Savings / sinking / surplus funds ARE tracked.** A manual "expense" of $500 into a savings fund
+    (saving toward a future purchase) is an **Other-bucket expense** that reduces rolling Other (D6 /
+    `BUDGET-FUND-EARMARK-1`), and the fund's balance **is** tracked and displayed. This is the bucket
+    that holds earmarked, budget-relevant money — distinct from the untracked buffer.
+- **Expected-expense ↔ real-transaction match-link — RESOLVED 2026-06-09 (add the column).** Add
+  `matched_transaction_id` (nullable FK → `transactions`) to the expected-expense row so an expected
+  expense (e.g. an $800 AirBnB placeholder) and the real charge that settles it ($800 Plaid txn) are
+  **explicitly linked**, counted **once** (`BUDGET-SETTLE-ON-MATCH-1`), and the link can be **reversed**
+  if the real charge is later removed (Plaid `removed`) — restoring the placeholder. Without the stored
+  link, a removed-after-match charge could not be un-matched.
 
 ### Decide-now (schema/affordance added now, feature deferred)
 - **D2 — Month-membership in a fixed home timezone `America/New_York`; timestamps stored UTC**
