@@ -44,23 +44,22 @@ pub mod server_state;
 
 use dioxus::prelude::*;
 
-use views::{BudgetView, Login};
+use views::{LedgerView, Login};
 
 /// The application route table.
 ///
 /// A central `Routable` enum (`RUST-DIOXUS-1`). Page-level views compose
-/// primitives; primitives never compose views. Routes are placeholders for
-/// Phase B0 (the scaffold): `Login` is the public entry (no public signup,
-/// `BUDGET-AUTH-GATE-1` — only a login), and `BudgetView` is the future
-/// authenticated transactions screen (`SPEC §7`).
+/// primitives; primitives never compose views. `Login` is the public entry (no
+/// public signup, `BUDGET-AUTH-GATE-1` — only a login), and `LedgerView` is the
+/// authenticated month-ledger screen (`SPEC §7`).
 #[derive(Routable, Clone, PartialEq)]
 pub enum Route {
     /// The login page — the only unauthenticated affordance.
     #[route("/")]
     Login {},
-    /// The authenticated budget / transactions view (placeholder).
+    /// The authenticated month-ledger view (`SPEC §7`).
     #[route("/budget")]
-    BudgetView {},
+    LedgerView {},
 }
 
 /// The root application component, shared by the server (SSR) and web (hydrate)

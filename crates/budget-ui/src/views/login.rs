@@ -60,7 +60,7 @@ pub fn Login() -> Element {
             match login(request).await {
                 Ok(()) => {
                     // Session established; go to the gated budget view.
-                    nav.push(Route::BudgetView {});
+                    nav.push(Route::LedgerView {});
                 }
                 Err(_) => {
                     // Opaque: the server does not reveal which factor failed.
@@ -95,7 +95,7 @@ pub fn Login() -> Element {
             .await;
             match result {
                 Ok(()) => {
-                    nav.push(Route::BudgetView {});
+                    nav.push(Route::LedgerView {});
                 }
                 Err(message) => error.set(Some(message)),
             }
