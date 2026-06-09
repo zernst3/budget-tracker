@@ -777,6 +777,7 @@ fn expense_txn(h: &Harness, month_id: MonthId, category: CategoryId, amount: Mon
         status: TransactionStatus::Settled,
         income_kind: None,
         is_rollover: false,
+        is_fund_draw: false,
         created_at: now_ts(),
         updated_at: now_ts(),
     }
@@ -790,18 +791,25 @@ fn expense_txn(h: &Harness, month_id: MonthId, category: CategoryId, amount: Mon
 /// reference to the production `net_leftover` or `counts_in_month_expense_remaining`:
 ///
 /// ```text
-/// net = (actual_income − expected_income) + Σ(non-income, non-fund, non-buffer-financed amounts)
+/// net = (actual_income − expected_income) + Σ(non-income, non-fund-draw, non-buffer-financed amounts)
 /// ```
 ///
-/// `fund_category_ids` = the categories that earmark money into a fund (sinking
-/// accrual / contribution / installment targets). `buffer_financed_ids` = the
-/// full-price tracking txns. Both are excluded so the dollar is counted once.
+/// D6 Model A: fund CONTRIBUTIONS (sinking accrual / surplus contribution /
+/// installment) are manual Other-bucket expenses that COUNT in the net — they are
+/// NOT excluded here. Only fund DRAWS (`is_fund_draw = true`: surplus draw, sinking
+/// payout) and the buffer-financed full-price tracking row (`buffer_financed_ids`)
+/// are excluded, so each dollar is counted exactly once (it was already expensed at
+/// contribution time). `fund_category_ids` is retained for signature symmetry with
+/// the production call sites but no longer drives an exclusion.
 fn oracle_month_net(
     txns: &[Transaction],
     fund_category_ids: &[CategoryId],
     buffer_financed_ids: &[TransactionId],
     expected_income: Decimal,
 ) -> Decimal {
+    // Intentionally unused under D6 Model A (contributions count); kept for
+    // signature parity with the production netting.
+    let _ = fund_category_ids;
     let mut actual_income = Decimal::ZERO;
     let mut expense_remaining = Decimal::ZERO;
     for t in txns {
@@ -811,14 +819,13 @@ fn oracle_month_net(
         let amt = t.amount.as_decimal();
         if t.income_kind.is_some() {
             actual_income += amt;
-        } else if t
-            .category_id
-            .is_some_and(|c| fund_category_ids.contains(&c))
-        {
-            // Fund contribution: excluded from the net (D6).
+        } else if t.is_fund_draw {
+            // Fund draw: excluded — money already expensed at contribution time (D6
+            // Model A, BUDGET-NO-DOUBLE-CHARGE-1).
         } else if buffer_financed_ids.contains(&t.id) {
             // Buffer-financed full price: excluded from the net (D7).
         } else {
+            // Everything else COUNTS — including fund contributions (D6 Model A).
             expense_remaining += amt;
         }
     }
@@ -844,25 +851,21 @@ impl SplitMix64 {
 }
 
 // ===========================================================================
-// EARMARK SINGLE-COUNTING (D6, BUDGET-FUND-EARMARK-1)
+// EARMARK SINGLE-COUNTING (D6 Model A, BUDGET-FUND-EARMARK-1)
 // ===========================================================================
 
-/// D6: a `contribute()` into a fund in an otherwise-zero-net month leaves the
-/// rolling-Other net at 0 (the contribution is EXCLUDED from the net) while the
-/// fund balance is +amount. Total system money — Other net + fund balance —
-/// equals the cash moved out of free-to-spend, counted exactly once.
-///
-/// NOTE on the brief's "net = −contribution" framing: that describes a model in
-/// which the contribution counts as a month expense AND is then excluded from
-/// the carryover chain. In THIS build the exclusion is TOTAL — the contribution
-/// never enters the net, so the carried-over net is 0. The conservation property
-/// (Other-net + fund-earmark == the contribution, no double-count, no loss) is
-/// the real invariant and is asserted directly; the divergence from the brief's
-/// wording is flagged here, not silently absorbed.
+/// D6 Model A: a `contribute()` into a fund in an otherwise-zero-net month makes
+/// the rolling-Other net −contribution (the contribution COUNTS as a manual
+/// Other-bucket expense) while the fund balance is +contribution. The earmarked
+/// dollar is counted exactly once — via that Other expense; the fund balance is
+/// NOT separately subtracted from free-to-spend. Cent conservation: the rolling
+/// Other is reduced by the contribution AND the fund is up by the contribution, so
+/// (Other-net + fund-balance) returns to 0 — the total spendable picture is
+/// unchanged, the dollar counted once.
 #[tokio::test]
-async fn earmark_contribution_excluded_from_net_and_counted_once() {
+async fn earmark_contribution_counts_in_net_and_counted_once() {
     let h = harness_zero_expected();
-    // 12-month sinking-style fund category so the lifecycle netting excludes it.
+    // 12-month sinking-style fund category (the contribution target).
     let fund_cat = h.add_fund_category(12, Money::from_major(1_200));
     let fund_id = h.push_surplus(Money::ZERO);
 
@@ -898,26 +901,27 @@ async fn earmark_contribution_excluded_from_net_and_counted_once() {
 
     let feb_rollover = h.rollover_of(2026, 2).await;
 
-    // The contribution is EXCLUDED from the rollover net: an otherwise-zero month
-    // rolls over $0, NOT −$250 and NOT +$250.
+    // The contribution COUNTS in the rollover net: an otherwise-zero month rolls
+    // over −$250 (NOT $0), reduced by exactly the contribution (D6 Model A).
     assert_eq!(
-        feb_rollover,
-        Money::ZERO,
-        "fund contribution must be excluded from the rolling-Other net (D6)"
+        feb_rollover, -contribution,
+        "fund contribution must COUNT in the rolling-Other net (D6 Model A): −$250"
     );
 
-    // Independent oracle agrees the net is 0 with the fund category excluded.
+    // Independent oracle agrees the net is −contribution with NO fund exclusion.
     let jan_txns = h.txns.list_for_month(jan.id).await.unwrap();
     let oracle = oracle_month_net(&jan_txns, &[fund_cat], &[], Decimal::ZERO);
-    assert_eq!(oracle, Decimal::ZERO);
+    assert_eq!(oracle, -contribution.as_decimal());
     assert_eq!(feb_rollover.as_decimal(), oracle);
 
-    // CONSERVATION: Other net + fund earmark == the cash moved out of free-to-
-    // spend, i.e. the $250 is represented exactly once across the two ledgers.
+    // CONSERVATION (D6 Model A): the rolling Other is reduced by the contribution
+    // AND the fund is up by the contribution, so the two ledgers sum back to 0 —
+    // the dollar is represented exactly once (via the Other expense), with no
+    // separate fund-balance subtraction from free-to-spend.
     assert_eq!(
         feb_rollover + h.fund_balance(fund_id).await,
-        contribution,
-        "the earmarked dollar must be counted exactly once across Other + fund"
+        Money::ZERO,
+        "rolling Other reduced by the contribution AND fund up by the contribution (counted once)"
     );
 }
 
@@ -949,11 +953,12 @@ async fn earmark_control_ordinary_expense_does_roll_into_other() {
     );
 }
 
-/// EARMARK property: across many awkward contribution amounts, the fund balance
-/// equals exactly the sum of contributions and the rolling net stays 0 (each
-/// earmarked dollar counted once). Conservation across the whole month.
+/// EARMARK property (D6 Model A): across many awkward contribution amounts, the
+/// fund balance equals exactly Σ contributions and the rolling net equals
+/// −Σ contributions (every contribution COUNTS in the net, each dollar counted
+/// once). Conservation: rolling Other + fund balance returns to 0 across the month.
 #[tokio::test]
-async fn earmark_property_many_contributions_conserve_and_net_zero() {
+async fn earmark_property_many_contributions_count_and_conserve() {
     for seed in 0..150_u64 {
         let mut rng = SplitMix64(seed.wrapping_mul(0x1234_5678_9ABC_DEF1).wrapping_add(1));
         let h = harness_zero_expected();
@@ -1001,15 +1006,15 @@ async fn earmark_property_many_contributions_conserve_and_net_zero() {
 
         let rollover = h.rollover_of(2026, 2).await;
         assert_eq!(
-            rollover,
-            Money::ZERO,
-            "seed {seed}: all contributions excluded -> net 0"
+            rollover, -total,
+            "seed {seed}: all contributions COUNT -> net = −Σ contributions (D6 Model A)"
         );
-        // Conservation across both ledgers.
+        // Conservation: rolling Other reduced by Σ contributions AND fund up by the
+        // same, so the two ledgers sum back to 0 — each dollar counted exactly once.
         assert_eq!(
             rollover + h.fund_balance(fund_id).await,
-            total,
-            "seed {seed}: earmarked dollars counted exactly once across Other + fund"
+            Money::ZERO,
+            "seed {seed}: rolling Other reduced AND fund up by the same (counted once)"
         );
     }
 }
@@ -1356,15 +1361,16 @@ async fn buffer_financed_over_payment_is_rejected() {
 // SURPLUS DRAW (D7) — fund-draw, no repayment, no double-charge
 // ===========================================================================
 
-/// D7 surplus draw: drawing a surplus fund for a purchase is a fund-draw — it
-/// creates NO obligation, draws the fund by the price, and is NOT re-charged as a
-/// budget expense (excluded from the rolling net, so it is not double-counted
-/// against the contributions that funded it).
+/// D6 Model A / D7 surplus draw: drawing a surplus fund for a purchase is a
+/// fund-draw (`is_fund_draw = true`) — it creates NO obligation, draws the fund by the
+/// price, and is NOT re-charged as a budget expense (excluded from the rolling net,
+/// so it is not double-counted against the contributions that already counted when
+/// they funded it).
 #[tokio::test]
 async fn surplus_draw_no_obligation_no_recharge_no_double_count() {
     let h = harness_zero_expected();
-    // The earmark category for the surplus draw: a fund category so the draw is
-    // excluded from the rolling net (BUDGET-NO-DOUBLE-CHARGE-1).
+    // The earmark category for the surplus draw; the draw is excluded from the
+    // rolling net via its is_fund_draw flag (BUDGET-NO-DOUBLE-CHARGE-1 / D6 Model A).
     let earmark = h.add_fund_category(12, Money::from_major(1_200));
     let fund_id = h.push_surplus(Money::from_major(1_000));
 
@@ -1435,10 +1441,12 @@ async fn surplus_draw_no_obligation_no_recharge_no_double_count() {
     assert_eq!(feb_rollover.as_decimal(), oracle);
 }
 
-/// D7 no-double-count: the FULL arc — contribute into a surplus fund, then draw
-/// it for a purchase — moves the dollar exactly once. Net over the month is
-/// −0 (both the contribution and the draw are excluded), and the surplus fund
-/// ends with (contributions − draw). No money created or destroyed.
+/// D6 Model A no-double-count: the FULL arc — contribute into a surplus fund, then
+/// draw it for a purchase — moves the dollar exactly once. The CONTRIBUTION counts
+/// (rolling Other = −contribution); the DRAW is excluded (not re-charged). The
+/// surplus fund ends with (contribution − price), and the total spendable picture
+/// (Other + fund) drops by exactly the price actually spent — no money created or
+/// destroyed.
 #[tokio::test]
 async fn surplus_contribute_then_draw_counts_dollar_once() {
     let h = harness_zero_expected();
@@ -1488,13 +1496,24 @@ async fn surplus_contribute_then_draw_counts_dollar_once() {
         .await
         .expect("init feb");
 
-    // Both the contribution and the draw are excluded -> net 0.
-    assert_eq!(h.rollover_of(2026, 2).await, Money::ZERO);
+    // D6 Model A: the contribution COUNTS (−$1,000), the draw is excluded -> the
+    // rolling Other is −contribution.
+    let rollover = h.rollover_of(2026, 2).await;
+    assert_eq!(rollover, -contribution);
 
-    // Oracle: contribution + draw both fund-category => excluded => net 0.
+    // Oracle: contribution counts, draw excluded via is_fund_draw -> net = −$1,000.
     let jan_txns = h.txns.list_for_month(jan.id).await.unwrap();
     let oracle = oracle_month_net(&jan_txns, &[earmark], &[], Decimal::ZERO);
-    assert_eq!(oracle, Decimal::ZERO);
+    assert_eq!(oracle, -contribution.as_decimal());
+    assert_eq!(rollover.as_decimal(), oracle);
+
+    // CONSERVATION: total spendable (Other + fund) dropped by exactly the price
+    // actually spent on the purchase — the dollar counted once.
+    assert_eq!(
+        rollover + h.fund_balance(fund_id).await,
+        -price,
+        "total spendable falls by the price spent; the dollar is counted once"
+    );
 }
 
 /// A surplus draw must be REJECTED on a buffer fund (the resolution requires
@@ -1540,12 +1559,12 @@ async fn surplus_draw_rejected_on_buffer_fund() {
 // SINKING FUND (SPEC §4.7)
 // ===========================================================================
 
-/// §4.7 accrual: each monthly accrual adds `amount / period_months` to the
-/// category `fund_balance` and CARRIES OVER (does not reset). Three accruals on a
-/// $1,200/12 fund leave `fund_balance` = $300, and each accrual posts an excluded
-/// fund expense so the rolling net stays 0.
+/// §4.7 accrual (D6 Model A): each monthly accrual adds `amount / period_months` to
+/// the category `fund_balance` and CARRIES OVER (does not reset). Three accruals on
+/// a $1,200/12 fund leave `fund_balance` = $300, and each accrual posts a manual
+/// Other-bucket expense that COUNTS in the rolling net, so the net is −$300.
 #[tokio::test]
-async fn sinking_accrual_carries_over_and_is_excluded() {
+async fn sinking_accrual_carries_over_and_counts_in_net() {
     let h = harness_zero_expected();
     // $1,200 / 12 = $100 / month.
     let sinking = h.add_fund_category(12, Money::from_major(1_200));
@@ -1573,21 +1592,31 @@ async fn sinking_accrual_carries_over_and_is_excluded() {
         "three accruals carry over to $300 (no reset)"
     );
 
-    // Each accrual is a fund-category expense excluded from the net.
+    // Each accrual is a manual Other-bucket expense that COUNTS in the net (D6
+    // Model A): three $100 accruals roll over −$300.
     h.lifecycle
         .ensure_current_month(h.user_id, ny_noon(2026, 2, 8))
         .await
         .expect("init feb");
+    let total_accrued = per_month + per_month + per_month;
     assert_eq!(
         h.rollover_of(2026, 2).await,
-        Money::ZERO,
-        "sinking accruals are excluded from the rolling net (BUDGET-FUND-EARMARK-1)"
+        -total_accrued,
+        "sinking accruals COUNT in the rolling net (BUDGET-FUND-EARMARK-1 / D6 Model A): −$300"
     );
 
     let jan_txns = h.txns.list_for_month(jan.id).await.unwrap();
     let oracle = oracle_month_net(&jan_txns, &[sinking], &[], Decimal::ZERO);
-    assert_eq!(oracle, Decimal::ZERO);
+    assert_eq!(oracle, -total_accrued.as_decimal());
     assert_eq!(h.rollover_of(2026, 2).await.as_decimal(), oracle);
+
+    // CONSERVATION: rolling Other (−$300) + fund balance (+$300) = 0 — the dollar
+    // counted once, fund balance not separately subtracted from free-to-spend.
+    assert_eq!(
+        h.rollover_of(2026, 2).await + h.category_fund_balance(sinking).await,
+        Money::ZERO,
+        "rolling Other reduced by the accruals AND fund up by the same (counted once)"
+    );
 }
 
 /// §4.7 accrual property: the carried-over balance equals exactly
@@ -1851,10 +1880,11 @@ async fn buffer_health_verdicts_are_pure_and_neutral_for_non_buffer() {
 // ===========================================================================
 
 /// Sanity: contributions and accruals add transactions to the SAME store the
-/// lifecycle reads, so a mixed month (income + ordinary expense + fund earmark)
-/// nets exactly the non-fund part. Guards against the fakes silently diverging.
+/// lifecycle reads, so a mixed month (income + ordinary expense + fund
+/// contribution) nets all three under D6 Model A — the contribution COUNTS like any
+/// other Other-bucket expense. Guards against the fakes silently diverging.
 #[tokio::test]
-async fn mixed_month_nets_only_the_non_fund_part() {
+async fn mixed_month_nets_income_expense_and_contribution() {
     let h = harness_with_expected(Money::from_major(4_000));
     let exp_cat = h.add_expense_category();
     let fund_cat = h.add_fund_category(12, Money::from_major(1_200));
@@ -1874,7 +1904,7 @@ async fn mixed_month_nets_only_the_non_fund_part() {
     // Ordinary expense −$30.
     h.txns
         .push(expense_txn(&h, jan.id, exp_cat, Money::from_major(-30)));
-    // Fund contribution $200 (excluded).
+    // Fund contribution $200 — COUNTS under D6 Model A.
     h.fund_service
         .contribute(
             fund_id,
@@ -1895,15 +1925,16 @@ async fn mixed_month_nets_only_the_non_fund_part() {
         .await
         .expect("init feb");
 
-    // Net = (4050 - 4000) + (-30) = +$20. The $200 fund earmark is excluded.
+    // Net = (4050 - 4000) + (-30) + (-200 contribution) = −$180 (D6 Model A: the
+    // $200 fund contribution COUNTS).
     assert_eq!(
         h.rollover_of(2026, 2).await,
-        Money::from_major(20),
-        "net counts only the non-fund part: (+50 income) + (-30 expense) = +20"
+        Money::from_major(-180),
+        "net counts all three: (+50 income) + (-30 expense) + (-200 contribution) = -180"
     );
 
     let jan_txns = h.txns.list_for_month(jan.id).await.unwrap();
     let oracle = oracle_month_net(&jan_txns, &[fund_cat], &[], Decimal::new(400_000, 2));
-    assert_eq!(oracle, Decimal::new(2_000, 2));
+    assert_eq!(oracle, Decimal::new(-18_000, 2));
     assert_eq!(h.rollover_of(2026, 2).await.as_decimal(), oracle);
 }

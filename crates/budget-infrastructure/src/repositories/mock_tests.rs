@@ -147,6 +147,7 @@ fn sample_txn_model(
         status,
         income_kind: None,
         is_rollover,
+        is_fund_draw: false,
         created_at: now_fixed().into(),
         updated_at: now_fixed().into(),
     }

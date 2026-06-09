@@ -164,6 +164,7 @@ fn sample_txn(
         status,
         income_kind: None,
         is_rollover: false,
+        is_fund_draw: false,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }

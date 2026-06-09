@@ -422,6 +422,7 @@ async fn post_rollover_if_absent(
         status: TransactionStatus::Settled,
         income_kind: None,
         is_rollover: true,
+        is_fund_draw: false,
         created_at: now,
         updated_at: now,
     };

@@ -715,6 +715,7 @@ fn base_txn(h: &Harness, month_id: MonthId, amount: Money) -> Transaction {
         status: TransactionStatus::Settled,
         income_kind: None,
         is_rollover: false,
+        is_fund_draw: false,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
@@ -769,14 +770,14 @@ fn net_leftover_income_surplus_raises_other_by_formula() {
 }
 
 // ---------------------------------------------------------------------------
-// expense_remaining_sum + fund exclusion (D6 / BUDGET-FUND-EARMARK-1)
+// expense_remaining_sum + fund contributions COUNT (D6 Model A / BUDGET-FUND-EARMARK-1)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn rollover_excludes_fund_contributions() {
-    // BUDGET-FUND-EARMARK-1: a $100 sinking-fund contribution is an expense
-    // against the month but is EXCLUDED from the net, so it does not also show
-    // up as Other surplus. An equal $100 ordinary expense IS in the net.
+async fn rollover_counts_fund_contributions() {
+    // BUDGET-FUND-EARMARK-1 (D6 Model A): a $100 fund contribution is a manual
+    // Other-bucket expense that COUNTS in the net (is_fund_draw=false), exactly like
+    // an ordinary $100 expense. Both count, so the net is −$200.
     let h = harness();
     let fund_cat = add_fund_category(&h, "Insurance fund");
     let exp_cat = add_expense_category(&h, "Groceries");
@@ -794,7 +795,8 @@ async fn rollover_excludes_fund_contributions() {
     income.income_kind = Some(IncomeKind::Budgeted);
     push_txn(&h, income);
 
-    // $100 ordinary expense (counts) + $100 fund contribution (excluded).
+    // $100 ordinary expense (counts) + $100 fund contribution (also counts under
+    // Model A: a manual Other-bucket expense, is_fund_draw=false).
     let mut ordinary = base_txn(&h, jan.id, Money::from_major(-100));
     ordinary.category_id = Some(exp_cat);
     push_txn(&h, ordinary);
@@ -803,8 +805,8 @@ async fn rollover_excludes_fund_contributions() {
     fund.category_id = Some(fund_cat);
     push_txn(&h, fund);
 
-    // Advance to Feb; the Jan->Feb rollover should be -$100 (only the ordinary
-    // expense), NOT -$200.
+    // Advance to Feb; the Jan->Feb rollover should be -$200 (both the ordinary
+    // expense AND the fund contribution count under D6 Model A).
     h.service
         .ensure_current_month(h.user_id, ny_noon(2026, 2, 10))
         .await
@@ -824,8 +826,8 @@ async fn rollover_excludes_fund_contributions() {
         .expect("rollover exists");
     assert_eq!(
         rollover.amount,
-        Money::from_major(-100),
-        "fund contribution must be excluded from the rollover net"
+        Money::from_major(-200),
+        "fund contribution COUNTS in the rollover net (D6 Model A): ordinary + contribution"
     );
     assert!(rollover.is_rollover);
     assert_eq!(rollover.category_id, Some(h.rollover_bucket_id));

@@ -62,7 +62,6 @@ pub use paycheck_config::PaycheckConfig;
 pub use plaid_item::PlaidItem;
 pub use predicates::{
     FixedSettlement, counts_in_budget, counts_in_month_expense_remaining, fixed_category_spent,
-    is_fund_contribution,
 };
 pub use projections::{CategorySpent, MonthNet};
 pub use repayment_obligation::RepaymentObligation;

@@ -293,6 +293,12 @@ CREATE TABLE IF NOT EXISTS transactions (
     status               transaction_status NOT NULL,
     income_kind          income_kind,
     is_rollover          BOOLEAN            NOT NULL DEFAULT FALSE,
+    -- D6 Model A (the no-recharge rule): a fund DRAW (surplus draw, sinking payout)
+    -- that must NOT be re-charged against the month budget. The cash was already
+    -- expensed at contribution time; the draw is excluded from the month
+    -- expense-remaining sum. Contributions/installments/accruals leave this FALSE
+    -- and therefore COUNT.
+    is_fund_draw         BOOLEAN            NOT NULL DEFAULT FALSE,
     created_at           TIMESTAMPTZ        NOT NULL,
     updated_at           TIMESTAMPTZ        NOT NULL
 );

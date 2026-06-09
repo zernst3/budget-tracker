@@ -14,15 +14,18 @@
 //!
 //! ## The two invariants this service is built around
 //!
-//! - **`BUDGET-FUND-EARMARK-1` (D6).** Money moved INTO a fund (sinking accrual,
-//!   surplus contribution, buffer-repayment installment) is an expense against the
-//!   month that reduces free-to-spend AND is excluded from the rolling-Other net,
-//!   so an earmarked dollar is counted exactly once. The exclusion is the SAME
-//!   seam the month-lifecycle service (build step 4) uses: a contribution
-//!   transaction is assigned to a fund-bound category, which
-//!   [`budget_domain::predicates::counts_in_month_expense_remaining`] excludes.
-//! - **`BUDGET-NO-DOUBLE-CHARGE-1` (D7).** A fund DRAW (sinking payout, surplus
-//!   draw, buffer financing) is a fund-draw, never a re-charged budget expense.
+//! - **`BUDGET-FUND-EARMARK-1` (D6 Model A).** Money moved INTO a fund (sinking
+//!   accrual, surplus contribution, buffer-repayment installment) is a manual
+//!   Other-bucket expense that **COUNTS** in budget math: it reduces the month
+//!   net-leftover (and thus the rolling Other) by the contribution while the fund
+//!   balance rises by the same amount. The earmark bites exactly once, through that
+//!   Other expense; fund balances are NOT separately subtracted from free-to-spend.
+//!   A $50 contribution in an otherwise-zero-net month makes the rolling Other −$50
+//!   with the fund balance +$50. Contributions carry `is_fund_draw = false`, so
+//!   [`budget_domain::predicates::counts_in_month_expense_remaining`] counts them.
+//! - **`BUDGET-NO-DOUBLE-CHARGE-1` (D6 Model A / D7).** A fund DRAW (sinking
+//!   payout, surplus draw, buffer financing) is a fund-draw, never a re-charged
+//!   budget expense — the money was already expensed at contribution time.
 //!   For a buffer-financed purchase the full-price transaction posts for TRACKING
 //!   only, with ZERO month-budget impact — excluded from the month
 //!   expense-remaining because it is referenced by a repayment obligation (the
@@ -128,20 +131,21 @@ impl FundService {
     // -----------------------------------------------------------------------
 
     /// Contribute `amount` (a positive magnitude) INTO a buffer or surplus fund
-    /// from a month's spendable budget (`BUDGET-FUND-EARMARK-1` / D6).
+    /// from a month's spendable budget (`BUDGET-FUND-EARMARK-1` / D6 Model A).
     ///
     /// Atomically (`SERVICE-TX-1`):
-    ///   - posts an expense transaction for `-amount` against `earmark_category_id`
-    ///     — a fund-bound category that
+    ///   - posts a manual EXPENSE transaction for `-amount` against
+    ///     `earmark_category_id` (the rollover "Other" bucket) with
+    ///     `is_fund_draw = false`, so
     ///     [`budget_domain::predicates::counts_in_month_expense_remaining`]
-    ///     excludes from the rolling-Other net, so the earmarked dollar reduces
-    ///     free-to-spend and is counted exactly once (never again as Other
-    ///     surplus), and
+    ///     **counts** it: the contribution reduces the month net-leftover (and thus
+    ///     the rolling Other that carries forward) by `amount`, and
     ///   - increments the fund balance by `amount`.
     ///
-    /// `earmark_category_id` must be the fund-bound category the caller designates
-    /// (the SAME exclusion seam the sinking accrual uses); the month-lifecycle
-    /// netting treats any transaction assigned to a fund category as earmarked.
+    /// Under D6 Model A the earmark bites exactly once, through this Other expense;
+    /// fund balances are NOT separately subtracted from free-to-spend. A $50
+    /// contribution in an otherwise-zero-net month makes the rolling Other −$50 with
+    /// the fund balance +$50.
     ///
     /// # Errors
     /// [`DomainError`] if the fund is absent, `amount` is not positive, or on any
@@ -162,9 +166,10 @@ impl FundService {
         }
         let mut fund = self.load_fund(fund_id).await?;
 
-        // The contribution is an EXPENSE against the month (negative amount) on a
-        // fund-bound category so it is excluded from the rollover net
-        // (BUDGET-FUND-EARMARK-1).
+        // The contribution is a manual EXPENSE against the month (negative amount)
+        // on the rollover "Other" bucket; is_fund_draw=false so it COUNTS in the
+        // rolling-Other net (BUDGET-FUND-EARMARK-1 / D6 Model A), reducing it by the
+        // contribution while the fund balance rises by the same amount.
         let txn = Transaction {
             id: TransactionId::generate(),
             user_id: fund.user_id,
@@ -179,6 +184,7 @@ impl FundService {
             status: TransactionStatus::Settled,
             income_kind: None,
             is_rollover: false,
+            is_fund_draw: false,
             created_at: now,
             updated_at: now,
         };
@@ -245,6 +251,7 @@ impl FundService {
         }
         match resolution {
             LargePurchaseResolution::PayInFull => {
+                // An ordinary expense — it COUNTS in the month budget (not a draw).
                 let txn = purchase_txn(
                     user_id,
                     month_id,
@@ -252,6 +259,7 @@ impl FundService {
                     price,
                     description,
                     date,
+                    false,
                     now,
                 );
                 let id = txn.id;
@@ -317,10 +325,10 @@ impl FundService {
                     .to_owned(),
             ));
         }
-        // The purchase is a fund-DRAW on a fund-bound category: excluded from the
-        // rolling-Other net (reuses BUDGET-NO-DOUBLE-CHARGE-1 + sinking-payout
-        // logic) — it was already funded by the earlier surplus contributions, so
-        // it is NOT a re-charged budget expense.
+        // The purchase is a fund-DRAW (is_fund_draw=true): excluded from the
+        // rolling-Other net (BUDGET-NO-DOUBLE-CHARGE-1 / D6 Model A) — the money was
+        // already expensed by the earlier surplus CONTRIBUTIONS (which count under
+        // Model A), so this draw is NOT a re-charged budget expense.
         let txn = purchase_txn(
             user_id,
             month_id,
@@ -328,6 +336,7 @@ impl FundService {
             price,
             description,
             date,
+            true,
             now,
         );
         let id = txn.id;
@@ -380,7 +389,18 @@ impl FundService {
         // it is referenced by the obligation below (the buffer fronted the cash).
         // SPEC §4.9 D7 — this is exactly what stops the full price from blowing up
         // its month.
-        let txn = purchase_txn(user_id, month_id, None, price, description, date, now);
+        // is_fund_draw=false: the full-price tracking row is excluded from the month
+        // budget via its obligation-keyed list (D7), NOT the fund-draw flag.
+        let txn = purchase_txn(
+            user_id,
+            month_id,
+            None,
+            price,
+            description,
+            date,
+            false,
+            now,
+        );
         let txn_id = txn.id;
 
         // The buffer fronts the cash: draw it down now. The installments restore
@@ -428,9 +448,10 @@ impl FundService {
     ///
     /// Atomically (`SERVICE-TX-1`):
     ///   - posts the installment as a month-budget expense on `earmark_category_id`
-    ///     — a fund-bound category, so it reduces free-to-spend but is excluded
-    ///     from the rolling-Other net (`BUDGET-FUND-EARMARK-1`: money flowing back
-    ///     INTO the buffer is an earmark, counted once),
+    ///     (the rollover "Other" bucket) with `is_fund_draw = false`, so it COUNTS
+    ///     in the rolling-Other net (`BUDGET-FUND-EARMARK-1` / D6 Model A: money
+    ///     flowing back INTO the buffer is a contribution that reduces the net,
+    ///     counted once),
     ///   - restores the buffer balance by the installment, and
     ///   - decrements the obligation's remaining + months; when `remaining`
     ///     reaches zero the obligation flips to `paid`.
@@ -478,8 +499,8 @@ impl FundService {
         };
 
         // The installment is a month-budget EXPENSE flowing back into the buffer:
-        // negative amount on a fund-bound category -> excluded from the rollover
-        // net (BUDGET-FUND-EARMARK-1) but reduces free-to-spend this month.
+        // negative amount, is_fund_draw=false -> COUNTS in the rolling-Other net
+        // (BUDGET-FUND-EARMARK-1 / D6 Model A), reducing free-to-spend this month.
         let txn = Transaction {
             id: TransactionId::generate(),
             user_id: obligation.user_id,
@@ -494,6 +515,7 @@ impl FundService {
             status: TransactionStatus::Settled,
             income_kind: None,
             is_rollover: false,
+            is_fund_draw: false,
             created_at: now,
             updated_at: now,
         };
@@ -535,9 +557,10 @@ impl FundService {
     ///   - added to the carried-over `Category::fund_balance` (the envelope
     ///     carries forward month to month, unlike a normal category that resets),
     ///     and
-    ///   - posted as an expense transaction on the sinking category so it reduces
-    ///     free-to-spend and is excluded from the rolling-Other net
-    ///     (`BUDGET-FUND-EARMARK-1`).
+    ///   - posted as a manual expense transaction (`is_fund_draw = false`) on the
+    ///     sinking category so it reduces free-to-spend AND COUNTS in the
+    ///     rolling-Other net (`BUDGET-FUND-EARMARK-1` / D6 Model A): the accrual
+    ///     reduces the rolling Other while `fund_balance` rises by the same amount.
     ///
     /// Atomically (`SERVICE-TX-1`): the category balance bump and the contribution
     /// transaction commit together.
@@ -581,6 +604,7 @@ impl FundService {
             status: TransactionStatus::Settled,
             income_kind: None,
             is_rollover: false,
+            is_fund_draw: false,
             created_at: now,
             updated_at: now,
         };
@@ -610,10 +634,11 @@ impl FundService {
     ///     ahead) so accrual is forward-looking — you save for the FUTURE
     ///     occurrence, not the past one.
     ///
-    /// The payout transaction itself is assigned to the sinking category, so it is
-    /// excluded from the rolling-Other net (reuses the sinking exclusion +
-    /// `BUDGET-NO-DOUBLE-CHARGE-1`: it is a fund-draw, not a re-charged budget
-    /// expense — the reserve already earmarked the money).
+    /// The payout transaction itself is assigned to the sinking category AND marked
+    /// `is_fund_draw = true`, so it is excluded from the rolling-Other net
+    /// (`BUDGET-NO-DOUBLE-CHARGE-1` / D6 Model A: it is a fund-draw, not a
+    /// re-charged budget expense — the money was already expensed by the accrual
+    /// contributions that built the reserve).
     ///
     /// `paid_amount` is the positive bill magnitude; the reserve may go negative if
     /// the bill exceeds what was accrued (under-saved), which surfaces as a
@@ -651,9 +676,12 @@ impl FundService {
                     "payout transaction {payout_transaction_id} not found"
                 ))
             })?;
-        // Assign the real bill to the sinking category so it is excluded from the
-        // rolling-Other net (the reserve, not this month's cash, covers it).
+        // Assign the real bill to the sinking category and mark it a fund DRAW so it
+        // is excluded from the rolling-Other net (D6 Model A: the reserve — built
+        // from already-counted accrual contributions — covers it, not this month's
+        // cash; BUDGET-NO-DOUBLE-CHARGE-1).
         payout.category_id = Some(category_id);
+        payout.is_fund_draw = true;
         payout.updated_at = now;
 
         // Draw the reserve down.
@@ -759,6 +787,13 @@ impl FundService {
 /// Build a `-price` expense transaction for a large purchase. `category_id`
 /// `None` is the uncategorized buffer-financed tracking row; `Some` is the
 /// pay-in-full / surplus-draw category assignment.
+///
+/// `is_fund_draw` marks the row as a fund DRAW that must NOT be re-charged against
+/// the month budget (`BUDGET-NO-DOUBLE-CHARGE-1` / D6 Model A): `true` for a
+/// surplus draw (money already expensed at contribution time), `false` for a
+/// pay-in-full ordinary expense and for the buffer-financed full-price tracking
+/// row (the latter is excluded via its obligation-keyed list instead, `SPEC §4.9`
+/// D7).
 #[allow(clippy::too_many_arguments)]
 fn purchase_txn(
     user_id: UserId,
@@ -767,6 +802,7 @@ fn purchase_txn(
     price: Money,
     description: String,
     date: NaiveDate,
+    is_fund_draw: bool,
     now: DateTime<Utc>,
 ) -> Transaction {
     Transaction {
@@ -783,6 +819,7 @@ fn purchase_txn(
         status: TransactionStatus::Settled,
         income_kind: None,
         is_rollover: false,
+        is_fund_draw,
         created_at: now,
         updated_at: now,
     }

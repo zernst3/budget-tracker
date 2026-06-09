@@ -2,9 +2,11 @@
 //!
 //! DB-free in-memory fakes per aggregate, mirroring the month-lifecycle test
 //! style. The tests assert the two load-bearing invariants:
-//!   - a fund contribution / installment is an expense on a fund-bound category,
-//!     so `counts_in_month_expense_remaining` excludes it from the rolling-Other
-//!     net (`BUDGET-FUND-EARMARK-1` / D6), and
+//!   - a fund contribution / sinking accrual / installment is a manual Other-bucket
+//!     expense (`is_fund_draw = false`), so `counts_in_month_expense_remaining`
+//!     COUNTS it in the rolling-Other net, reducing it by the contribution
+//!     (`BUDGET-FUND-EARMARK-1` / D6 Model A), while a fund DRAW (surplus draw,
+//!     sinking payout; `is_fund_draw = true`) is excluded, and
 //!   - a buffer-financed full-price transaction is excluded from the month
 //!     expense sum (it is referenced by the obligation), while the installments
 //!     ARE counted (`BUDGET-NO-DOUBLE-CHARGE-1` / D7).
@@ -546,7 +548,7 @@ fn now() -> chrono::DateTime<Utc> {
 // ===========================================================================
 
 #[tokio::test]
-async fn contribution_increments_balance_and_posts_excluded_expense() {
+async fn contribution_increments_balance_and_posts_counted_expense() {
     let h = harness();
     let fund = surplus_fund(&h, Money::from_major(0));
     let fund_id = fund.id;
@@ -568,18 +570,21 @@ async fn contribution_increments_balance_and_posts_excluded_expense() {
     // Balance went up by the contribution.
     assert_eq!(updated.balance, Money::from_major(300));
 
-    // Exactly one transaction posted: a -$300 expense on the fund-bound category.
+    // Exactly one transaction posted: a -$300 expense on the Other-bucket category.
     let txns = h.transactions.all();
     assert_eq!(txns.len(), 1);
     let c = &txns[0];
     assert_eq!(c.amount, Money::from_major(-300));
     assert_eq!(c.category_id, Some(h.earmark_category_id));
+    // D6 Model A: a contribution is NOT a fund draw — it counts.
+    assert!(!c.is_fund_draw, "a contribution is not a fund draw");
 
-    // BUDGET-FUND-EARMARK-1: it is EXCLUDED from the rolling-Other expense sum.
+    // BUDGET-FUND-EARMARK-1 (D6 Model A): it COUNTS in the rolling-Other expense
+    // sum, reducing the net by the contribution.
     let fund_cats = fund_category_ids(&h);
     assert!(
-        !counts_in_month_expense_remaining(c, &fund_cats, &[]),
-        "fund contribution must be excluded from the rolling-Other net"
+        counts_in_month_expense_remaining(c, &fund_cats, &[]),
+        "fund contribution must COUNT in the rolling-Other net (D6 Model A)"
     );
 }
 
@@ -664,9 +669,9 @@ async fn buffer_financed_full_price_is_excluded_but_installments_count() {
         "buffer-financed full price must be excluded from the month expense sum"
     );
 
-    // Post one installment: it IS a counted month-budget expense (on the
-    // fund-bound earmark category, so excluded from the *rollover* net but it
-    // restores the buffer and decrements the obligation).
+    // Post one installment: it IS a counted month-budget expense (D6 Model A —
+    // is_fund_draw=false, so it reduces the rolling-Other net) AND it restores the
+    // buffer and decrements the obligation.
     let after = h
         .service
         .post_installment(
@@ -682,6 +687,22 @@ async fn buffer_financed_full_price_is_excluded_but_installments_count() {
     assert_eq!(after.months_remaining, 11);
     let buffer = h.funds.find_by_id(fund_id).await.unwrap().unwrap();
     assert_eq!(buffer.balance, Money::from_major(3_900));
+
+    // The installment row COUNTS in the rolling-Other net (D6 Model A).
+    let installment = h
+        .transactions
+        .all()
+        .into_iter()
+        .find(|t| t.description == "Buffer repayment installment")
+        .expect("installment txn");
+    assert!(
+        !installment.is_fund_draw,
+        "an installment is a contribution back into the buffer, not a draw"
+    );
+    assert!(
+        counts_in_month_expense_remaining(&installment, &fund_cats, &buffer_financed),
+        "buffer-repayment installment must COUNT in the rolling-Other net (D6 Model A)"
+    );
 }
 
 #[tokio::test]
@@ -788,9 +809,11 @@ async fn pay_through_surplus_draws_fund_with_no_obligation() {
         "surplus draw creates no repayment obligation"
     );
 
-    // The draw is on the fund-bound category -> excluded from the net (not a
-    // re-charged budget expense; BUDGET-NO-DOUBLE-CHARGE-1).
+    // The draw is a fund DRAW (is_fund_draw=true) -> excluded from the net (not a
+    // re-charged budget expense; BUDGET-NO-DOUBLE-CHARGE-1 / D6 Model A — the money
+    // was already expensed by the surplus contributions, which count).
     let draw = h.transactions.find_by_id(txn_id).await.unwrap().unwrap();
+    assert!(draw.is_fund_draw, "a surplus draw is a fund draw");
     let fund_cats = fund_category_ids(&h);
     assert!(!counts_in_month_expense_remaining(&draw, &fund_cats, &[]));
 }
@@ -824,7 +847,7 @@ async fn buffer_financed_requires_a_buffer_fund() {
 // ===========================================================================
 
 #[tokio::test]
-async fn sinking_accrual_adds_monthly_share_and_excludes_from_net() {
+async fn sinking_accrual_adds_monthly_share_and_counts_in_net() {
     // $1,200 / 12 = $100 accrued into fund_balance.
     let h = harness();
     let updated = h
@@ -843,12 +866,13 @@ async fn sinking_accrual_adds_monthly_share_and_excludes_from_net() {
     let txns = h.transactions.all();
     assert_eq!(txns.len(), 1);
     assert_eq!(txns[0].amount, Money::from_major(-100));
+    // D6 Model A: the accrual is a contribution, not a draw -> it COUNTS in the net.
+    assert!(
+        !txns[0].is_fund_draw,
+        "a sinking accrual is not a fund draw"
+    );
     let fund_cats = fund_category_ids(&h);
-    assert!(!counts_in_month_expense_remaining(
-        &txns[0],
-        &fund_cats,
-        &[]
-    ));
+    assert!(counts_in_month_expense_remaining(&txns[0], &fund_cats, &[]));
 }
 
 #[tokio::test]
@@ -891,6 +915,7 @@ async fn tag_sinking_payout_draws_reserve_and_resets_clock_forward() {
         status: TransactionStatus::Settled,
         income_kind: None,
         is_rollover: false,
+        is_fund_draw: false,
         created_at: now(),
         updated_at: now(),
     };
@@ -915,9 +940,12 @@ async fn tag_sinking_payout_draws_reserve_and_resets_clock_forward() {
     // the payment date (forward-looking accrual, SPEC §4.7).
     assert_eq!(updated.next_due_date, Some(ymd(2027, 7, 15)));
 
-    // The bill was reassigned to the sinking category -> excluded from the net.
+    // The bill was reassigned to the sinking category AND marked a fund DRAW ->
+    // excluded from the net (D6 Model A: the reserve, built from already-counted
+    // accrual contributions, covers it; BUDGET-NO-DOUBLE-CHARGE-1).
     let tagged = h.transactions.find_by_id(bill_id).await.unwrap().unwrap();
     assert_eq!(tagged.category_id, Some(h.earmark_category_id));
+    assert!(tagged.is_fund_draw, "a sinking payout is a fund draw");
     let fund_cats = fund_category_ids(&h);
     assert!(!counts_in_month_expense_remaining(&tagged, &fund_cats, &[]));
 }

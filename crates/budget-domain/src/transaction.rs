@@ -54,6 +54,18 @@ pub struct Transaction {
     /// (`BUDGET-ROLLOVER-INTEGRITY-1`). A DB partial unique on `(month_id) WHERE
     /// is_rollover` prevents double-posting.
     pub is_rollover: bool,
+    /// `true` for a fund DRAW that must NOT be re-charged against the month budget
+    /// (surplus draw, sinking payout; `BUDGET-NO-DOUBLE-CHARGE-1` / D6 Model A).
+    ///
+    /// Under D6 Model A the money was already expensed at CONTRIBUTION time (the
+    /// contribution counts in the net); the later draw is a fund-draw, not a
+    /// re-charged budget expense, so it is excluded from the month
+    /// expense-remaining sum
+    /// ([`crate::predicates::counts_in_month_expense_remaining`]). Contributions,
+    /// installments, and sinking accruals are NOT draws — they leave this `false`
+    /// and therefore COUNT. The buffer-financed full-price tracking row uses its own
+    /// obligation-keyed exclusion (`SPEC §4.9` D7) and leaves this `false`.
+    pub is_fund_draw: bool,
     /// When the row was created (UTC, `DOMAIN-7`).
     pub created_at: DateTime<Utc>,
     /// When the row was last updated (UTC, `DOMAIN-7`).

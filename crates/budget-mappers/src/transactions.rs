@@ -96,6 +96,7 @@ fn build_transaction(m: transactions::Model, amount: Money) -> Transaction {
         status: status_to_domain(m.status),
         income_kind: m.income_kind.map(income_kind_to_domain),
         is_rollover: m.is_rollover,
+        is_fund_draw: m.is_fund_draw,
         created_at: m.created_at.with_timezone(&Utc),
         updated_at: m.updated_at.with_timezone(&Utc),
     }
@@ -193,6 +194,7 @@ pub fn domain_to_active_model(v: &Transaction) -> transactions::ActiveModel {
         status: Set(status_to_entity(v.status)),
         income_kind: Set(v.income_kind.map(income_kind_to_entity)),
         is_rollover: Set(v.is_rollover),
+        is_fund_draw: Set(v.is_fund_draw),
         created_at: Set(v.created_at.into()),
         updated_at: Set(v.updated_at.into()),
     }
@@ -221,6 +223,7 @@ mod tests {
             status: transactions::TransactionStatus::Settled,
             income_kind: None,
             is_rollover: false,
+            is_fund_draw: false,
             created_at: now.into(),
             updated_at: now.into(),
         }
@@ -273,6 +276,24 @@ mod tests {
         m.source = transactions::TransactionSource::Manual;
         let domain = model_to_domain(m).unwrap_or_else(|_| unreachable!());
         assert!(domain.is_rollover);
+    }
+
+    #[test]
+    fn fund_draw_flag_round_trips_both_directions() {
+        // D6 Model A: the is_fund_draw flag (surplus draw / sinking payout) must
+        // survive read AND write so the netting exclusion is durable.
+        let mut m = sample_model(Decimal::new(-80000, 2)); // -$800 surplus draw
+        m.is_fund_draw = true;
+        m.source = transactions::TransactionSource::Manual;
+        let domain = model_to_domain(m).unwrap_or_else(|_| unreachable!());
+        assert!(domain.is_fund_draw, "is_fund_draw preserved on read");
+
+        let active = domain_to_active_model(&domain);
+        assert_eq!(
+            active.is_fund_draw,
+            sea_orm::ActiveValue::Set(true),
+            "is_fund_draw preserved on write"
+        );
     }
 
     #[test]

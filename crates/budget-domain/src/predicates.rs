@@ -82,26 +82,38 @@ pub fn fixed_category_spent(
     }
 }
 
-/// `BUDGET-FUND-EARMARK-1` + `BUDGET-NO-DOUBLE-CHARGE-1` (D6 / D7) — the single
-/// predicate deciding whether a transaction contributes to a month's expense
-/// remaining sum (the `Σ(expense category remaining)` term of the `D5` net,
-/// `SPEC §4.3`).
+/// `BUDGET-FUND-EARMARK-1` + `BUDGET-NO-DOUBLE-CHARGE-1` (D6 Model A / D7) — the
+/// single predicate deciding whether a transaction contributes to a month's
+/// expense remaining sum (the `Σ(expense category remaining)` term of the `D5`
+/// net, `SPEC §4.3`).
 ///
 /// A transaction's signed `amount` flows into the month-expense sum iff ALL of:
 ///   - it counts in budget by status ([`counts_in_budget`],
 ///     `BUDGET-STATUS-DRIVES-INCLUSION-1`),
 ///   - it is **not** income (income belongs to the `(actual - expected)` term,
 ///     `D5`),
-///   - it is **not** a fund contribution — an outflow assigned to a sinking-fund
-///     category (`fund_category_ids`). Earmarked money is already an expense once;
-///     it is excluded here so the dollar is counted exactly once
-///     (`BUDGET-FUND-EARMARK-1` / D6), and
+///   - it is **not** a fund **draw** (`is_fund_draw = true`: surplus draw, sinking
+///     payout). Under D6 Model A the money was already expensed at CONTRIBUTION
+///     time, so the later draw is a fund-draw, not a re-charged budget expense
+///     (`BUDGET-NO-DOUBLE-CHARGE-1`); excluding it here keeps the dollar counted
+///     exactly once, and
 ///   - it is **not** a buffer-financed full-price purchase
 ///     (`buffer_financed_txn_ids`). That row posts for TRACKING only with ZERO
 ///     month-budget impact: the buffer draw fronts the cash, and the *budget*
 ///     effect is the compulsory installments (ordinary expenses) flowing back into
 ///     the buffer (`SPEC §4.9` D7). Excluding the full price here is exactly what
 ///     stops it from blowing up its month while the installments are counted.
+///
+/// **D6 Model A (`BUDGET-FUND-EARMARK-1`).** A fund CONTRIBUTION — sinking accrual,
+/// surplus contribution, buffer-repayment installment — is a manual Other-bucket
+/// expense that **COUNTS** in the net, reducing the rolling Other by the
+/// contribution while the fund balance rises by the same amount. Contributions are
+/// therefore NOT excluded here (they are ordinary `-amount` expenses with
+/// `is_fund_draw = false`): the earmark bites exactly once, through that Other
+/// expense, and fund balances are never separately subtracted from free-to-spend.
+/// `fund_category_ids` is retained on the signature for the buffer-financed /
+/// month-lifecycle plumbing but no longer drives a contribution exclusion (that was
+/// the rejected Model-B total-exclusion behaviour).
 ///
 /// This is the one place the rolling-Other expense exclusions live, so the
 /// month-lifecycle netting (build step 4) and the fund service (build step 5)
@@ -114,20 +126,15 @@ pub fn counts_in_month_expense_remaining(
     fund_category_ids: &[CategoryId],
     buffer_financed_txn_ids: &[TransactionId],
 ) -> bool {
+    // `fund_category_ids` is intentionally unused for the inclusion decision under
+    // D6 Model A (contributions now COUNT); it is kept on the signature so the
+    // month-lifecycle netting call site stays stable while the buffer-financed
+    // exclusion plumbing carries forward.
+    let _ = fund_category_ids;
     counts_in_budget(txn.status)
         && !txn.is_income()
-        && !is_fund_contribution(txn, fund_category_ids)
+        && !txn.is_fund_draw
         && !buffer_financed_txn_ids.contains(&txn.id)
-}
-
-/// `true` when `txn` is a contribution INTO a sinking fund: an outflow (or
-/// zero/any non-income row) assigned to a category in `fund_category_ids`
-/// (`BUDGET-FUND-EARMARK-1`). Money earmarked into a fund is excluded from the
-/// rolling-Other net so it is counted exactly once.
-#[must_use]
-pub fn is_fund_contribution(txn: &Transaction, fund_category_ids: &[CategoryId]) -> bool {
-    txn.category_id
-        .is_some_and(|cid| fund_category_ids.contains(&cid))
 }
 
 #[cfg(test)]
@@ -176,5 +183,78 @@ mod tests {
         let spent = fixed_category_spent(FixedSettlement::Settled, placeholder, electricity + gas);
         assert_eq!(spent, Money::from_minor(-8_012 - 6_433));
         assert_ne!(spent, placeholder);
+    }
+
+    // -- D6 Model A: counts_in_month_expense_remaining ---------------------
+
+    /// A bare expense transaction for the Model-A inclusion tests.
+    fn expense(amount: Money, category_id: Option<CategoryId>, is_fund_draw: bool) -> Transaction {
+        use chrono::{NaiveDate, Utc};
+
+        use crate::enums::TransactionSource;
+        use crate::ids::{MonthId, TransactionId, UserId};
+
+        let now = Utc::now();
+        Transaction {
+            id: TransactionId::generate(),
+            user_id: UserId::generate(),
+            month_id: MonthId::generate(),
+            category_id,
+            account_id: None,
+            date: NaiveDate::from_ymd_opt(2026, 6, 8).unwrap_or(NaiveDate::MIN),
+            amount,
+            description: "t".to_owned(),
+            source: TransactionSource::Manual,
+            plaid_transaction_id: None,
+            status: TransactionStatus::Settled,
+            income_kind: None,
+            is_rollover: false,
+            is_fund_draw,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn d6_model_a_fund_contribution_on_fund_category_counts() {
+        // D6 Model A: a contribution (is_fund_draw=false) on a fund-bound category
+        // COUNTS — the fund category id no longer drives an exclusion.
+        let fund_cat = CategoryId::generate();
+        let contribution = expense(Money::from_minor(-5_000), Some(fund_cat), false);
+        assert!(
+            counts_in_month_expense_remaining(&contribution, &[fund_cat], &[]),
+            "a fund contribution must COUNT in the month expense sum (D6 Model A)"
+        );
+    }
+
+    #[test]
+    fn d6_model_a_fund_draw_is_excluded() {
+        // A fund DRAW (is_fund_draw=true) is excluded — money already expensed at
+        // contribution time (BUDGET-NO-DOUBLE-CHARGE-1).
+        let fund_cat = CategoryId::generate();
+        let draw = expense(Money::from_minor(-80_000), Some(fund_cat), true);
+        assert!(
+            !counts_in_month_expense_remaining(&draw, &[fund_cat], &[]),
+            "a fund draw must be excluded from the month expense sum"
+        );
+    }
+
+    #[test]
+    fn d6_model_a_buffer_financed_full_price_excluded_via_list() {
+        // The buffer-financed full-price tracking row is excluded via its
+        // obligation-keyed list, NOT the fund-draw flag (D7).
+        let full_price = expense(Money::from_minor(-120_000), None, false);
+        let ids = [full_price.id];
+        assert!(
+            !counts_in_month_expense_remaining(&full_price, &[], &ids),
+            "buffer-financed full price must be excluded via its txn-id list"
+        );
+    }
+
+    #[test]
+    fn d6_model_a_ordinary_expense_counts() {
+        let cat = CategoryId::generate();
+        let e = expense(Money::from_minor(-2_500), Some(cat), false);
+        assert!(counts_in_month_expense_remaining(&e, &[], &[]));
     }
 }

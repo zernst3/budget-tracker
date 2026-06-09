@@ -94,6 +94,11 @@ pub struct Model {
     /// (`BUDGET-ROLLOVER-INTEGRITY-1`). A DB partial unique on `(month_id) WHERE is_rollover`
     /// prevents double-posting; enforced at the DB level only (ENTITIES-8).
     pub is_rollover: bool,
+    /// True for a fund DRAW (surplus draw, sinking payout) that must NOT be
+    /// re-charged against the month budget (`BUDGET-NO-DOUBLE-CHARGE-1` / D6 Model
+    /// A). The money was already expensed at contribution time; the draw is excluded
+    /// from the month expense-remaining sum.
+    pub is_fund_draw: bool,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
 }

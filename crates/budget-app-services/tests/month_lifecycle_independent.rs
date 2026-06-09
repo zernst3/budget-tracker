@@ -680,6 +680,7 @@ fn txn(h: &Harness, month_id: MonthId, amount: Money) -> Transaction {
         status: TransactionStatus::Settled,
         income_kind: None,
         is_rollover: false,
+        is_fund_draw: false,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
@@ -722,8 +723,14 @@ fn ny_noon(year: i32, month: u32, day: u32) -> DateTime<Utc> {
 /// re-implementation of `SPEC §4.3`:
 ///
 /// ```text
-/// net = (actual_income − expected_income) + Σ(non-income, non-fund, counting amounts)
+/// net = (actual_income − expected_income) + Σ(non-income, non-fund-draw, counting amounts)
 /// ```
+///
+/// D6 Model A: a fund CONTRIBUTION is a manual Other-bucket expense that COUNTS in
+/// the net — it is NOT excluded here. Only fund DRAWS (`is_fund_draw = true`) are
+/// excluded (the money was already expensed at contribution time). `fund_ids` is
+/// retained for signature parity with the call sites but no longer drives an
+/// exclusion.
 ///
 /// Returns the net as a `Decimal` so the comparison is at the raw arithmetic
 /// layer, not through the production `Money` ops.
@@ -732,6 +739,8 @@ fn oracle_month_net(
     fund_ids: &[CategoryId],
     expected_income: Decimal,
 ) -> Decimal {
+    // Intentionally unused under D6 Model A (contributions count).
+    let _ = fund_ids;
     let mut actual_income = Decimal::ZERO;
     let mut expense_remaining = Decimal::ZERO;
     for t in txns {
@@ -741,10 +750,11 @@ fn oracle_month_net(
         let amt = t.amount.as_decimal();
         if t.income_kind.is_some() {
             actual_income += amt;
-        } else if t.category_id.is_some_and(|c| fund_ids.contains(&c)) {
-            // Fund contribution: an expense, but excluded from the net so the
-            // earmarked dollar is counted exactly once (D6).
+        } else if t.is_fund_draw {
+            // Fund draw: excluded — money already expensed at contribution time
+            // (D6 Model A, BUDGET-NO-DOUBLE-CHARGE-1).
         } else {
+            // Everything else COUNTS — including fund contributions (D6 Model A).
             expense_remaining += amt;
         }
     }
@@ -945,37 +955,36 @@ async fn d6_fund_contribution_counted_once_keeps_system_money_invariant() {
         .unwrap()
         .expect("rollover");
 
-    // The contribution is EXCLUDED from the rollover net (D6): an otherwise-zero
-    // month rolls over $0, NOT −$250 and NOT +$250.
-    //
-    // NOTE on the invariant being asserted: BUDGET-FUND-EARMARK-1 says the fund
-    // contribution is excluded from the net. So the carried-over Other net is 0;
-    // the $250 lives entirely in the fund's earmark. The "−contribution" framing
-    // in the task brief describes a model where the contribution counts as a
-    // month expense AND is excluded from the chain; in THIS build the exclusion
-    // is total (it never enters the net at all), so the rollover is 0. Either
-    // way the conservation property below is the real invariant: Other-net +
-    // fund-earmark is unchanged. We assert the build's actual behavior and the
-    // conservation simultaneously, and flag the divergence from the brief.
+    // D6 Model A: the contribution COUNTS in the rollover net — an otherwise-zero
+    // month rolls over −$250 (NOT $0 and NOT +$250), reduced by exactly the
+    // contribution while the fund balance is +$250.
     let fund_earmark = contribution; // the dollars now sitting in the fund.
 
-    // Independent oracle: with the fund category excluded, the net is 0.
+    // Independent oracle: the contribution counts (no fund exclusion), so net is
+    // −contribution.
     let jan_txns = h.txns.list_for_month(jan.id).await.unwrap();
     let oracle_net = oracle_month_net(&jan_txns, &[fund_cat], Decimal::ZERO);
-    assert_eq!(oracle_net, Decimal::ZERO, "fund-excluded net is zero");
+    assert_eq!(
+        oracle_net,
+        -contribution.as_decimal(),
+        "fund contribution counts -> net = −contribution (D6 Model A)"
+    );
     assert_eq!(rollover.amount.as_decimal(), oracle_net);
+    assert_eq!(rollover.amount, -contribution);
 
-    // CONSERVATION: rollover (Other) net + fund earmark == total cash moved out
-    // of free-to-spend, i.e. the $250 is represented exactly once across the two
-    // ledgers (Σ Other + Σ fund == the contribution, no double-count, no loss).
+    // CONSERVATION (D6 Model A): the rolling Other is reduced by the contribution
+    // AND the fund is up by the contribution, so the two ledgers sum back to 0 —
+    // the $250 is counted exactly once (via the Other expense), with no separate
+    // fund-balance subtraction from free-to-spend.
     assert_eq!(
         rollover.amount + fund_earmark,
-        contribution,
-        "the earmarked dollar must be counted exactly once across Other + fund"
+        Money::ZERO,
+        "rolling Other reduced by the contribution AND fund up by the contribution (counted once)"
     );
 
-    // And a non-fund expense of the SAME size WOULD have rolled into Other,
-    // proving the exclusion is specifically the fund's doing (control case).
+    // And a non-fund expense of the SAME size ALSO rolls into Other as
+    // −contribution — under D6 Model A a fund contribution behaves like any other
+    // Other-bucket expense (both COUNT); the control confirms the parity.
     let h2 = harness_zero_expected();
     let exp_cat = add_expense_category(&h2);
     let jan2 = h2
@@ -1035,7 +1044,8 @@ async fn cent_conservation_single_rollover_vs_oracle() {
         e.category_id = Some(exp_cat);
         h.txns.push(e);
     }
-    // A fund contribution that must NOT enter the net.
+    // A fund contribution that COUNTS in the net (D6 Model A): a manual Other-bucket
+    // expense, is_fund_draw=false, so production and oracle both include it.
     let mut fund_txn = txn(&h, jan.id, Money::from_minor(-5_000));
     fund_txn.category_id = Some(fund_cat);
     h.txns.push(fund_txn);
@@ -1111,7 +1121,8 @@ async fn cent_conservation_multi_month_chain_property() {
                 e.category_id = Some(exp_cat);
                 h.txns.push(e);
             }
-            // Optionally a fund contribution (must be excluded from the chain).
+            // Optionally a fund contribution — under D6 Model A it COUNTS in the
+            // chain (is_fund_draw=false), exactly like an ordinary Other expense.
             if rng.bool() {
                 let mut f = txn(&h, m.id, Money::from_minor(rng.cents(-20_000, -1)));
                 f.category_id = Some(fund_cat);
