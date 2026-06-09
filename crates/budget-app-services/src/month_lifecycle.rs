@@ -356,9 +356,12 @@ impl MonthLifecycleService {
         // into THIS month's Other by finance_deficit). So a financed prior month
         // contributes a ZERO rollover; the deficit lives in the obligation, counted
         // exactly once across the installment chain.
+        // Match REGARDLESS of obligation status: a months==1 financing flips the
+        // obligation to Paid immediately, but the prior month's deficit was still
+        // financed and must not also roll forward (BUDGET-DEFICIT-FINANCING-1).
         if self
             .funds
-            .find_active_deficit_obligation_for_month(prior.id)
+            .find_deficit_obligation_for_month(prior.id)
             .await?
             .is_some()
         {

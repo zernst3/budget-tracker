@@ -126,16 +126,18 @@ impl FundRepository for PostgresFundRepository {
             .map_err(map_read)
     }
 
-    async fn find_active_deficit_obligation_for_month(
+    async fn find_deficit_obligation_for_month(
         &self,
         month_id: MonthId,
     ) -> Result<Option<RepaymentObligation>, RepositoryError> {
-        // At most one active source='deficit' obligation per origin month (D9);
-        // backed by ix_repayment_obligations_origin_month_id.
+        // At most one source='deficit' obligation per origin month (D9); backed by
+        // ix_repayment_obligations_origin_month_id. NOT filtered on status: a
+        // months==1 financing flips the obligation to Paid immediately, but the
+        // month's deficit is still financed and must stay suppressed from rollover
+        // (filtering on Active would double-count the single-month case).
         let model = repayment_obligations::Entity::find()
             .filter(repayment_obligations::Column::OriginMonthId.eq(month_id.value()))
             .filter(repayment_obligations::Column::Source.eq(EntityObligationSource::Deficit))
-            .filter(repayment_obligations::Column::Status.eq(EntityObligationStatus::Active))
             .one(&self.db)
             .await
             .map_err(map_db_err)?;

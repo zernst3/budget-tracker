@@ -76,7 +76,7 @@ use budget_app_services::{
 use budget_domain::budget::Budget;
 use budget_domain::category::Category;
 use budget_domain::enums::{
-    Cadence, CategoryGrp, FundKind, ObligationSource, ObligationStatus, TransactionSource,
+    Cadence, CategoryGrp, FundKind, ObligationSource, TransactionSource,
     TransactionStatus,
 };
 use budget_domain::fund::Fund;
@@ -592,7 +592,7 @@ impl FundRepository for MemFundRepo {
             .cloned())
     }
 
-    async fn find_active_deficit_obligation_for_month(
+    async fn find_deficit_obligation_for_month(
         &self,
         month_id: MonthId,
     ) -> Result<Option<RepaymentObligation>, RepositoryError> {
@@ -601,7 +601,6 @@ impl FundRepository for MemFundRepo {
             .find(|o| {
                 o.origin_month_id == Some(month_id)
                     && o.source == ObligationSource::Deficit
-                    && o.status == ObligationStatus::Active
             })
             .cloned())
     }

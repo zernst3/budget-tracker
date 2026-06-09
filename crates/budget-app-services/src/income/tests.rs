@@ -384,7 +384,7 @@ impl FundRepository for FakeFundRepo {
     ) -> Result<Option<RepaymentObligation>, RepositoryError> {
         Ok(None)
     }
-    async fn find_active_deficit_obligation_for_month(
+    async fn find_deficit_obligation_for_month(
         &self,
         _month_id: MonthId,
     ) -> Result<Option<RepaymentObligation>, RepositoryError> {

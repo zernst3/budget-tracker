@@ -522,7 +522,7 @@ impl FundRepository for MemFundRepo {
             .cloned())
     }
 
-    async fn find_active_deficit_obligation_for_month(
+    async fn find_deficit_obligation_for_month(
         &self,
         month_id: MonthId,
     ) -> Result<Option<RepaymentObligation>, RepositoryError> {
@@ -534,7 +534,6 @@ impl FundRepository for MemFundRepo {
             .find(|o| {
                 o.origin_month_id == Some(month_id)
                     && o.source == ObligationSource::Deficit
-                    && o.status == ObligationStatus::Active
             })
             .cloned())
     }

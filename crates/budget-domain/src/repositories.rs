@@ -387,18 +387,21 @@ pub trait FundRepository: Send + Sync {
         transaction_id: TransactionId,
     ) -> Result<Option<RepaymentObligation>, RepositoryError>;
 
-    /// Find the ACTIVE deficit-financing obligation whose `origin_month_id` is
-    /// `month_id`, if any (`SPEC §12` D9, `BUDGET-DEFICIT-FINANCING-1`).
+    /// Find the deficit-financing obligation whose `origin_month_id` is `month_id`,
+    /// if any, REGARDLESS OF STATUS (`SPEC §12` D9, `BUDGET-DEFICIT-FINANCING-1`).
     ///
-    /// At most one active `source = 'deficit'` obligation exists per origin month
-    /// (a month's deficit is financed at most once). The month-lifecycle rollover
-    /// path consumes this to suppress rolling the financed deficit forward in full
-    /// (the installments carry it instead); backed by
+    /// At most one `source = 'deficit'` obligation exists per origin month (a
+    /// month's deficit is financed at most once). The month-lifecycle rollover path
+    /// consumes this to suppress rolling the financed deficit forward in full (the
+    /// installments carry it instead). It MUST match `Paid` obligations too: a
+    /// single-month financing (`months == 1`) flips the obligation to `Paid` the
+    /// instant it is created, yet that month's deficit was still financed and must
+    /// stay suppressed — filtering on `Active` would double-count it. Backed by
     /// `ix_repayment_obligations_origin_month_id`.
     ///
     /// # Errors
     /// [`RepositoryError`] on any persistence failure.
-    async fn find_active_deficit_obligation_for_month(
+    async fn find_deficit_obligation_for_month(
         &self,
         month_id: MonthId,
     ) -> Result<Option<RepaymentObligation>, RepositoryError>;

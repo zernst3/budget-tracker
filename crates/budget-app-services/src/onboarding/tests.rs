@@ -551,7 +551,7 @@ impl FundRepository for FakeFundRepo {
             .find(|o| o.transaction_id == Some(transaction_id))
             .cloned())
     }
-    async fn find_active_deficit_obligation_for_month(
+    async fn find_deficit_obligation_for_month(
         &self,
         month_id: MonthId,
     ) -> Result<Option<RepaymentObligation>, RepositoryError> {
@@ -562,7 +562,6 @@ impl FundRepository for FakeFundRepo {
             .find(|o| {
                 o.origin_month_id == Some(month_id)
                     && o.source == budget_domain::enums::ObligationSource::Deficit
-                    && o.status == budget_domain::enums::ObligationStatus::Active
             })
             .cloned())
     }

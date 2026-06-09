@@ -180,10 +180,12 @@ impl FundRepository for FakeFundRepo {
             .find(|o| o.transaction_id == Some(transaction_id))
             .cloned())
     }
-    async fn find_active_deficit_obligation_for_month(
+    async fn find_deficit_obligation_for_month(
         &self,
         month_id: MonthId,
     ) -> Result<Option<RepaymentObligation>, RepositoryError> {
+        // Regardless of status — mirrors the real repo (a months==1 financing is
+        // Paid immediately yet must still suppress rollover).
         Ok(self
             .store
             .lock()
@@ -191,9 +193,7 @@ impl FundRepository for FakeFundRepo {
             .obligations
             .iter()
             .find(|o| {
-                o.origin_month_id == Some(month_id)
-                    && o.source == ObligationSource::Deficit
-                    && o.status == ObligationStatus::Active
+                o.origin_month_id == Some(month_id) && o.source == ObligationSource::Deficit
             })
             .cloned())
     }
@@ -1146,5 +1146,46 @@ async fn single_month_financing_posts_the_whole_principal_and_settles() {
     assert_eq!(ob.remaining_amount, Money::ZERO);
     assert_eq!(ob.status, ObligationStatus::Paid);
     // Next month's Other absorbed the whole $800 as installment 1.
+    assert_eq!(oracle_next_month_other_installments(&h), Decimal::from(800));
+}
+
+#[tokio::test]
+async fn single_month_financing_still_suppresses_the_rollover() {
+    // Regression (audit HIGH, 2026-06-09): a months==1 financing flips the
+    // obligation to Paid the instant it is created. The rollover-suppression query
+    // MUST still match it (it filters on origin_month_id + source=deficit, NOT on
+    // status) — otherwise the closed month's full $800 deficit would roll forward
+    // INTO next month's Other ON TOP OF the $800 installment-1, double-counting it.
+    let h = harness(
+        Money::from_major(800),
+        Money::from_major(900),
+        Decimal::new(75, 2),
+    );
+    let ob = h
+        .deficit
+        .finance_deficit(
+            &h.closed_month,
+            &h.next_month,
+            h.fund_id,
+            1,
+            ymd(2026, 8, 1),
+            Utc::now(),
+        )
+        .await
+        .expect("finance");
+    assert_eq!(ob.status, ObligationStatus::Paid, "months==1 settles at once");
+
+    let rolled = h
+        .lifecycle
+        .prior_month_net(h.next_month.user_id, h.next_month.year, h.next_month.month)
+        .await
+        .expect("prior net");
+    assert_eq!(
+        rolled,
+        Money::ZERO,
+        "a Paid single-month deficit obligation must STILL suppress the rollover — \
+         the $800 lives in installment 1, never also in the rollover (count once)"
+    );
+    // Count-once: installment 1 is the whole $800; the rollover adds nothing.
     assert_eq!(oracle_next_month_other_installments(&h), Decimal::from(800));
 }
