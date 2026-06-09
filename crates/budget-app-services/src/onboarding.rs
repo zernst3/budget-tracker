@@ -319,7 +319,8 @@ impl OnboardingService {
         };
 
         // Build the opening rows (pure construction, deterministically keyed).
-        let opening_txns = build_opening_transactions(input, month_id, bucket.id, genesis_date, now);
+        let opening_txns =
+            build_opening_transactions(input, month_id, bucket.id, genesis_date, now);
         let other_line_posted = !input.starting_other_balance.is_zero();
         let opening_charges_posted = opening_txns.len() - usize::from(other_line_posted);
 
