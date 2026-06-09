@@ -59,13 +59,16 @@ use budget_domain::category::Category;
 use budget_domain::enums::{
     Cadence, CategoryGrp, IncomeKind, TransactionSource, TransactionStatus,
 };
+use budget_domain::fund::Fund;
 use budget_domain::ids::{BudgetId, CategoryId, CategoryKey, MonthId, TransactionId, UserId};
+use budget_domain::ids::{FundId, RepaymentObligationId};
 use budget_domain::money::Money;
 use budget_domain::month::Month;
+use budget_domain::repayment_obligation::RepaymentObligation;
 use budget_domain::transaction::Transaction;
 use budget_domain::uow::{UnitOfWork, UowFuture, UowProvider};
 use budget_domain::{
-    BudgetRepository, CategorySpent, MonthNet, MonthRepository, RepositoryError,
+    BudgetRepository, CategorySpent, FundRepository, MonthNet, MonthRepository, RepositoryError,
     TransactionRepository,
 };
 
@@ -410,6 +413,121 @@ fn counts_independently(status: TransactionStatus) -> bool {
     )
 }
 
+/// Independent in-memory fund repo. These lifecycle tests post no obligations,
+/// so the buffer-financed exclusion set is empty — but the repo must exist to
+/// satisfy the service's `FundRepository` dependency (`SPEC §4.9` D7 seam).
+#[derive(Default)]
+struct MemFundRepo {
+    funds: Mutex<Vec<Fund>>,
+    obligations: Mutex<Vec<RepaymentObligation>>,
+}
+
+#[async_trait]
+impl FundRepository for MemFundRepo {
+    async fn find_by_id(&self, id: FundId) -> Result<Option<Fund>, RepositoryError> {
+        Ok(self
+            .funds
+            .lock()
+            .map_err(poisoned)?
+            .iter()
+            .find(|f| f.id == id)
+            .cloned())
+    }
+
+    async fn list_for_user(&self, user_id: UserId) -> Result<Vec<Fund>, RepositoryError> {
+        Ok(self
+            .funds
+            .lock()
+            .map_err(poisoned)?
+            .iter()
+            .filter(|f| f.user_id == user_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn save(
+        &self,
+        fund: &Fund,
+        _uow: Option<&dyn UnitOfWork>,
+    ) -> Result<(), RepositoryError> {
+        let mut g = self.funds.lock().map_err(poisoned)?;
+        if let Some(slot) = g.iter_mut().find(|f| f.id == fund.id) {
+            *slot = fund.clone();
+        } else {
+            g.push(fund.clone());
+        }
+        Ok(())
+    }
+
+    async fn find_obligation(
+        &self,
+        id: RepaymentObligationId,
+    ) -> Result<Option<RepaymentObligation>, RepositoryError> {
+        Ok(self
+            .obligations
+            .lock()
+            .map_err(poisoned)?
+            .iter()
+            .find(|o| o.id == id)
+            .cloned())
+    }
+
+    async fn list_active_obligations(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<RepaymentObligation>, RepositoryError> {
+        Ok(self
+            .obligations
+            .lock()
+            .map_err(poisoned)?
+            .iter()
+            .filter(|o| o.user_id == user_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn find_obligation_for_transaction(
+        &self,
+        transaction_id: TransactionId,
+    ) -> Result<Option<RepaymentObligation>, RepositoryError> {
+        Ok(self
+            .obligations
+            .lock()
+            .map_err(poisoned)?
+            .iter()
+            .find(|o| o.transaction_id == transaction_id)
+            .cloned())
+    }
+
+    async fn list_buffer_financed_transaction_ids(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<TransactionId>, RepositoryError> {
+        Ok(self
+            .obligations
+            .lock()
+            .map_err(poisoned)?
+            .iter()
+            .filter(|o| o.user_id == user_id)
+            .map(|o| o.transaction_id)
+            .collect())
+    }
+
+    async fn save_obligation(
+        &self,
+        obligation: &RepaymentObligation,
+        _uow: Option<&dyn UnitOfWork>,
+    ) -> Result<(), RepositoryError> {
+        let mut g = self.obligations.lock().map_err(poisoned)?;
+        if let Some(slot) = g.iter_mut().find(|o| o.id == obligation.id) {
+            *slot = obligation.clone();
+        } else {
+            g.push(obligation.clone());
+        }
+        Ok(())
+    }
+}
+
 // ===========================================================================
 // Harness
 // ===========================================================================
@@ -471,10 +589,13 @@ fn harness_with_income(income: Arc<dyn IncomeExpectation>) -> Harness {
         });
     }
 
+    let funds = Arc::new(MemFundRepo::default());
+
     let service = MonthLifecycleService::new(
         Arc::clone(&months) as Arc<dyn MonthRepository>,
         Arc::clone(&budgets) as Arc<dyn BudgetRepository>,
         Arc::clone(&txns) as Arc<dyn TransactionRepository>,
+        Arc::clone(&funds) as Arc<dyn FundRepository>,
         Arc::new(NoopUowProvider) as Arc<dyn UowProvider>,
         income,
     );

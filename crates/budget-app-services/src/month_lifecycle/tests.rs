@@ -29,10 +29,17 @@ use budget_domain::category::Category;
 use budget_domain::enums::{
     Cadence, CategoryGrp, IncomeKind, TransactionSource, TransactionStatus,
 };
-use budget_domain::ids::{BudgetId, CategoryId, CategoryKey, MonthId, TransactionId, UserId};
+use budget_domain::fund::Fund;
+use budget_domain::ids::{
+    BudgetId, CategoryId, CategoryKey, FundId, MonthId, RepaymentObligationId, TransactionId,
+    UserId,
+};
 use budget_domain::money::Money;
 use budget_domain::month::Month;
-use budget_domain::repositories::{BudgetRepository, MonthRepository, TransactionRepository};
+use budget_domain::repayment_obligation::RepaymentObligation;
+use budget_domain::repositories::{
+    BudgetRepository, FundRepository, MonthRepository, TransactionRepository,
+};
 use budget_domain::transaction::Transaction;
 use budget_domain::uow::{UnitOfWork, UowFuture, UowProvider};
 use budget_domain::{CategorySpent, MonthNet, RepositoryError};
@@ -439,6 +446,121 @@ impl TransactionRepository for FakeTransactionRepo {
     }
 }
 
+/// A fund repo holding obligations so the netting can exclude buffer-financed
+/// full-price transactions (`SPEC §4.9` D7). Funds themselves are unused by the
+/// month-lifecycle netting, so only the obligation surface is meaningful.
+#[derive(Default)]
+struct FundStore {
+    funds: Vec<Fund>,
+    obligations: Vec<RepaymentObligation>,
+}
+
+struct FakeFundRepo {
+    store: Mutex<FundStore>,
+}
+
+impl FakeFundRepo {
+    fn new() -> Self {
+        Self {
+            store: Mutex::new(FundStore::default()),
+        }
+    }
+}
+
+#[async_trait]
+impl FundRepository for FakeFundRepo {
+    async fn find_by_id(&self, id: FundId) -> Result<Option<Fund>, RepositoryError> {
+        let store = self.store.lock().map_err(poisoned)?;
+        Ok(store.funds.iter().find(|f| f.id == id).cloned())
+    }
+
+    async fn list_for_user(&self, user_id: UserId) -> Result<Vec<Fund>, RepositoryError> {
+        let store = self.store.lock().map_err(poisoned)?;
+        Ok(store
+            .funds
+            .iter()
+            .filter(|f| f.user_id == user_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn save(
+        &self,
+        fund: &Fund,
+        _uow: Option<&dyn UnitOfWork>,
+    ) -> Result<(), RepositoryError> {
+        let mut store = self.store.lock().map_err(poisoned)?;
+        if let Some(slot) = store.funds.iter_mut().find(|f| f.id == fund.id) {
+            *slot = fund.clone();
+        } else {
+            store.funds.push(fund.clone());
+        }
+        Ok(())
+    }
+
+    async fn find_obligation(
+        &self,
+        id: RepaymentObligationId,
+    ) -> Result<Option<RepaymentObligation>, RepositoryError> {
+        let store = self.store.lock().map_err(poisoned)?;
+        Ok(store.obligations.iter().find(|o| o.id == id).cloned())
+    }
+
+    async fn list_active_obligations(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<RepaymentObligation>, RepositoryError> {
+        let store = self.store.lock().map_err(poisoned)?;
+        Ok(store
+            .obligations
+            .iter()
+            .filter(|o| {
+                o.user_id == user_id && o.status == budget_domain::enums::ObligationStatus::Active
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn find_obligation_for_transaction(
+        &self,
+        transaction_id: TransactionId,
+    ) -> Result<Option<RepaymentObligation>, RepositoryError> {
+        let store = self.store.lock().map_err(poisoned)?;
+        Ok(store
+            .obligations
+            .iter()
+            .find(|o| o.transaction_id == transaction_id)
+            .cloned())
+    }
+
+    async fn list_buffer_financed_transaction_ids(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<TransactionId>, RepositoryError> {
+        let store = self.store.lock().map_err(poisoned)?;
+        Ok(store
+            .obligations
+            .iter()
+            .filter(|o| o.user_id == user_id)
+            .map(|o| o.transaction_id)
+            .collect())
+    }
+
+    async fn save_obligation(
+        &self,
+        obligation: &RepaymentObligation,
+        _uow: Option<&dyn UnitOfWork>,
+    ) -> Result<(), RepositoryError> {
+        let mut store = self.store.lock().map_err(poisoned)?;
+        if let Some(slot) = store.obligations.iter_mut().find(|o| o.id == obligation.id) {
+            *slot = obligation.clone();
+        } else {
+            store.obligations.push(obligation.clone());
+        }
+        Ok(())
+    }
+}
+
 fn poisoned<T>(_e: std::sync::PoisonError<T>) -> RepositoryError {
     RepositoryError::Database("test mutex poisoned".to_owned())
 }
@@ -451,6 +573,7 @@ struct Harness {
     months: Arc<FakeMonthRepo>,
     budgets: Arc<FakeBudgetRepo>,
     transactions: Arc<FakeTransactionRepo>,
+    funds: Arc<FakeFundRepo>,
     service: MonthLifecycleService,
     user_id: UserId,
     budget_id: BudgetId,
@@ -468,6 +591,7 @@ fn harness() -> Harness {
     let months = Arc::new(FakeMonthRepo::new());
     let budgets = Arc::new(FakeBudgetRepo::new());
     let transactions = Arc::new(FakeTransactionRepo::new());
+    let funds = Arc::new(FakeFundRepo::new());
 
     let user_id = UserId::generate();
     let budget_id = BudgetId::generate();
@@ -507,6 +631,7 @@ fn harness() -> Harness {
         Arc::clone(&months) as Arc<dyn MonthRepository>,
         Arc::clone(&budgets) as Arc<dyn BudgetRepository>,
         Arc::clone(&transactions) as Arc<dyn TransactionRepository>,
+        Arc::clone(&funds) as Arc<dyn FundRepository>,
         Arc::new(FakeUowProvider) as Arc<dyn UowProvider>,
         income,
     );
@@ -515,6 +640,7 @@ fn harness() -> Harness {
         months,
         budgets,
         transactions,
+        funds,
         service,
         user_id,
         budget_id,
@@ -704,6 +830,80 @@ async fn rollover_excludes_fund_contributions() {
     assert!(rollover.is_rollover);
     assert_eq!(rollover.category_id, Some(h.rollover_bucket_id));
     assert_eq!(rollover.date, ymd(2026, 2, 1));
+}
+
+#[tokio::test]
+async fn rollover_excludes_buffer_financed_full_price_but_includes_installment() {
+    // SPEC §4.9 D7: a buffer-financed full-price purchase posts for tracking with
+    // zero month-budget impact (excluded from the rollover net because an
+    // obligation references it), while the installment IS a counted month expense.
+    let h = harness();
+    let exp_cat = add_expense_category(&h, "Groceries");
+
+    let jan = h
+        .service
+        .ensure_current_month(h.user_id, ny_noon(2026, 1, 10))
+        .await
+        .expect("init jan");
+
+    // Income meets expectation exactly (no income variance).
+    let mut income = base_txn(&h, jan.id, Money::from_major(4_000));
+    income.income_kind = Some(IncomeKind::Budgeted);
+    push_txn(&h, income);
+
+    // The full-price buffer-financed tracking row: -$1,200, uncategorized.
+    let full_price = base_txn(&h, jan.id, Money::from_major(-1_200));
+    let full_price_id = full_price.id;
+    push_txn(&h, full_price);
+
+    // Register the obligation referencing that txn so the netting excludes it.
+    h.funds
+        .store
+        .lock()
+        .unwrap()
+        .obligations
+        .push(RepaymentObligation {
+            id: RepaymentObligationId::generate(),
+            user_id: h.user_id,
+            fund_id: FundId::generate(),
+            transaction_id: full_price_id,
+            total_amount: Money::from_major(1_200),
+            remaining_amount: Money::from_major(1_100),
+            installment_amount: Money::from_major(100),
+            months_remaining: 11,
+            status: budget_domain::enums::ObligationStatus::Active,
+            created_at: Utc::now(),
+        });
+
+    // A -$100 installment (a counted month expense) flowing back into the buffer.
+    let mut installment = base_txn(&h, jan.id, Money::from_major(-100));
+    installment.category_id = Some(exp_cat);
+    push_txn(&h, installment);
+
+    h.service
+        .ensure_current_month(h.user_id, ny_noon(2026, 2, 10))
+        .await
+        .expect("init feb");
+
+    let feb = h
+        .months
+        .find_by_year_month(h.user_id, 2026, 2)
+        .await
+        .expect("feb lookup")
+        .expect("feb exists");
+    let rollover = h
+        .transactions
+        .find_rollover_for_month(feb.id)
+        .await
+        .expect("rollover lookup")
+        .expect("rollover exists");
+    // The $1,200 full price is EXCLUDED; only the -$100 installment nets. Were the
+    // full price counted, the rollover would be -$1,300.
+    assert_eq!(
+        rollover.amount,
+        Money::from_major(-100),
+        "buffer-financed full price excluded; installment included"
+    );
 }
 
 // ---------------------------------------------------------------------------

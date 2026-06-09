@@ -9,8 +9,10 @@
 //!
 //! Services land in build step 3+ (see `.build-progress.md`).
 
+pub mod fund;
 pub mod income;
 pub mod month_lifecycle;
 
+pub use fund::{BufferHealth, FundService, LargePurchaseResolution};
 pub use income::{FixedExpectation, IncomeExpectation, SemimonthlyFixedExpectation};
 pub use month_lifecycle::{MonthLifecycleService, net_leftover};

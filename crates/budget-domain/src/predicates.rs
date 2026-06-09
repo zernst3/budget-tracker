@@ -13,7 +13,9 @@
 //! than an inline filter repeated per query.
 
 use crate::enums::TransactionStatus;
+use crate::ids::{CategoryId, TransactionId};
 use crate::money::Money;
+use crate::transaction::Transaction;
 
 /// `BUDGET-STATUS-DRIVES-INCLUSION-1` — the single inclusion predicate.
 ///
@@ -78,6 +80,54 @@ pub fn fixed_category_spent(
         FixedSettlement::Settled => sum_of_settled_transactions,
         FixedSettlement::Unsettled => placeholder,
     }
+}
+
+/// `BUDGET-FUND-EARMARK-1` + `BUDGET-NO-DOUBLE-CHARGE-1` (D6 / D7) — the single
+/// predicate deciding whether a transaction contributes to a month's expense
+/// remaining sum (the `Σ(expense category remaining)` term of the `D5` net,
+/// `SPEC §4.3`).
+///
+/// A transaction's signed `amount` flows into the month-expense sum iff ALL of:
+///   - it counts in budget by status ([`counts_in_budget`],
+///     `BUDGET-STATUS-DRIVES-INCLUSION-1`),
+///   - it is **not** income (income belongs to the `(actual - expected)` term,
+///     `D5`),
+///   - it is **not** a fund contribution — an outflow assigned to a sinking-fund
+///     category (`fund_category_ids`). Earmarked money is already an expense once;
+///     it is excluded here so the dollar is counted exactly once
+///     (`BUDGET-FUND-EARMARK-1` / D6), and
+///   - it is **not** a buffer-financed full-price purchase
+///     (`buffer_financed_txn_ids`). That row posts for TRACKING only with ZERO
+///     month-budget impact: the buffer draw fronts the cash, and the *budget*
+///     effect is the compulsory installments (ordinary expenses) flowing back into
+///     the buffer (`SPEC §4.9` D7). Excluding the full price here is exactly what
+///     stops it from blowing up its month while the installments are counted.
+///
+/// This is the one place the rolling-Other expense exclusions live, so the
+/// month-lifecycle netting (build step 4) and the fund service (build step 5)
+/// cannot drift apart. Rollover rows (`is_rollover = true`) are *not* excluded:
+/// they are a real signed line item in Other, the auditable carryover
+/// (`BUDGET-ROLLOVER-INTEGRITY-1`).
+#[must_use]
+pub fn counts_in_month_expense_remaining(
+    txn: &Transaction,
+    fund_category_ids: &[CategoryId],
+    buffer_financed_txn_ids: &[TransactionId],
+) -> bool {
+    counts_in_budget(txn.status)
+        && !txn.is_income()
+        && !is_fund_contribution(txn, fund_category_ids)
+        && !buffer_financed_txn_ids.contains(&txn.id)
+}
+
+/// `true` when `txn` is a contribution INTO a sinking fund: an outflow (or
+/// zero/any non-income row) assigned to a category in `fund_category_ids`
+/// (`BUDGET-FUND-EARMARK-1`). Money earmarked into a fund is excluded from the
+/// rolling-Other net so it is counted exactly once.
+#[must_use]
+pub fn is_fund_contribution(txn: &Transaction, fund_category_ids: &[CategoryId]) -> bool {
+    txn.category_id
+        .is_some_and(|cid| fund_category_ids.contains(&cid))
 }
 
 #[cfg(test)]

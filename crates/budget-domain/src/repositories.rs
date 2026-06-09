@@ -359,6 +359,35 @@ pub trait FundRepository: Send + Sync {
         user_id: UserId,
     ) -> Result<Vec<RepaymentObligation>, RepositoryError>;
 
+    /// Find the obligation backing a specific buffer-financed purchase
+    /// transaction, if any (`SPEC §4.9` D7). The installment posting path looks up
+    /// the obligation for a given full-price transaction.
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure.
+    async fn find_obligation_for_transaction(
+        &self,
+        transaction_id: TransactionId,
+    ) -> Result<Option<RepaymentObligation>, RepositoryError>;
+
+    /// The set of transaction ids that are buffer-financed full-price purchases —
+    /// the `transaction_id` of EVERY repayment obligation for the user, active or
+    /// paid (`SPEC §4.9` D7).
+    ///
+    /// These rows post for TRACKING only and must be excluded from the month
+    /// expense-remaining sum *permanently* (even after the obligation is paid):
+    /// the cash was fronted by the buffer, never out of the month's budget; the
+    /// budget effect was the installments (`BUDGET-FUND-EARMARK-1` /
+    /// `counts_in_month_expense_remaining`). The month-lifecycle netting (build
+    /// step 4) consumes this set to drive that exclusion.
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure.
+    async fn list_buffer_financed_transaction_ids(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<TransactionId>, RepositoryError>;
+
     /// Insert or update a repayment obligation (creation on a buffer-financed
     /// purchase; balance decrement on each installment; close on settle).
     ///

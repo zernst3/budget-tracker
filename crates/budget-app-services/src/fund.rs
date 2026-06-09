@@ -1,0 +1,804 @@
+//! The fund service — the virtual-envelope primitive in three kinds, plus
+//! large-purchase resolution and sinking-fund accrual (`SPEC §4.7`, `§4.9`,
+//! build step 5; D6 / D7).
+//!
+//! A fund is ONE primitive with three kinds:
+//!   - **buffer** (`compulsory_repayment = true`, has a lean `target_balance`):
+//!     the tappable emergency/working pool; a draw that finances a large purchase
+//!     creates a [`budget_domain::repayment_obligation::RepaymentObligation`].
+//!   - **surplus** (`compulsory_repayment = false`): pre-saved toward a planned
+//!     purchase; a draw is a fund-draw, not a re-charged budget expense.
+//!   - **sinking** (`SPEC §4.7`): a category-attached virtual envelope
+//!     (`Category::fund_balance`) that auto-accrues toward a scheduled recurring
+//!     bill and resets on payment.
+//!
+//! ## The two invariants this service is built around
+//!
+//! - **`BUDGET-FUND-EARMARK-1` (D6).** Money moved INTO a fund (sinking accrual,
+//!   surplus contribution, buffer-repayment installment) is an expense against the
+//!   month that reduces free-to-spend AND is excluded from the rolling-Other net,
+//!   so an earmarked dollar is counted exactly once. The exclusion is the SAME
+//!   seam the month-lifecycle service (build step 4) uses: a contribution
+//!   transaction is assigned to a fund-bound category, which
+//!   [`budget_domain::predicates::counts_in_month_expense_remaining`] excludes.
+//! - **`BUDGET-NO-DOUBLE-CHARGE-1` (D7).** A fund DRAW (sinking payout, surplus
+//!   draw, buffer financing) is a fund-draw, never a re-charged budget expense.
+//!   For a buffer-financed purchase the full-price transaction posts for TRACKING
+//!   only, with ZERO month-budget impact — excluded from the month
+//!   expense-remaining because it is referenced by a repayment obligation (the
+//!   buffer fronted the cash). The budget effect is the compulsory installments
+//!   flowing back into the buffer until `remaining = 0` -> `status = paid`.
+//!
+//! ## Buffer health (`SPEC §4.9`)
+//!
+//! [`FundService::buffer_health`] is an ADVISORY flag only: above target -> excess
+//! to invest externally; below target with outstanding obligations -> caution. It
+//! NEVER blocks; Zach's judgment, with the data surfaced, decides.
+//!
+//! ## Transactionality (`SERVICE-TX-1`, `REPO-10`)
+//!
+//! Every cross-aggregate write (funds + transactions + `repayment_obligations` +
+//! the sinking category) runs through the [`UowProvider`] closure
+//! ([`UowProviderExt::run`]), committing atomically. The service holds
+//! `Arc<dyn _>` dependencies (`SERVICE-DI-1`); no `db.*` lives here.
+
+use std::sync::Arc;
+
+use chrono::{DateTime, NaiveDate, Utc};
+
+use budget_domain::category::Category;
+use budget_domain::enums::{FundKind, ObligationStatus, TransactionSource, TransactionStatus};
+use budget_domain::error::DomainError;
+use budget_domain::fund::Fund;
+use budget_domain::ids::{
+    CategoryId, FundId, MonthId, RepaymentObligationId, TransactionId, UserId,
+};
+use budget_domain::money::Money;
+use budget_domain::repayment_obligation::RepaymentObligation;
+use budget_domain::repositories::{BudgetRepository, FundRepository, TransactionRepository};
+use budget_domain::transaction::Transaction;
+use budget_domain::uow::{UnitOfWork, UowProvider, UowProviderExt};
+
+/// Advisory buffer-health verdict (`SPEC §4.9`) — surfaced, never enforced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufferHealth {
+    /// Balance is above the lean target: the excess should be invested externally
+    /// (Zach dislikes idle cash). Carries the excess amount.
+    AboveTarget(Money),
+    /// Balance is below target AND there are outstanding repayment obligations:
+    /// caution before stacking another large draw. Carries the shortfall.
+    BelowTargetWithObligations(Money),
+    /// Balance is below target with no outstanding obligations: building back up,
+    /// no flag. Carries the shortfall.
+    BelowTarget(Money),
+    /// At or healthily on target (or no target set): nothing to surface.
+    OnTarget,
+}
+
+/// How a large purchase is resolved at purchase time (`SPEC §4.9` D7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LargePurchaseResolution {
+    /// Ordinary expense — posts a normal budget transaction.
+    PayInFull,
+    /// Draw a pre-saved surplus fund down; NO repayment. The purchase is a
+    /// fund-draw, not a re-charged budget expense (reuses
+    /// `BUDGET-NO-DOUBLE-CHARGE-1` + sinking-payout logic).
+    PayThroughSurplus(FundId),
+    /// Buffer fronts the cash: the full-price transaction posts for TRACKING with
+    /// ZERO month-budget impact, offset by a buffer draw, and a repayment
+    /// obligation is created. The installments are the month-budget expenses.
+    BufferFinanced {
+        /// The buffer fund fronting the cash.
+        fund_id: FundId,
+        /// Number of compulsory monthly installments to repay over.
+        months: i32,
+    },
+}
+
+/// The fund service (`SPEC §4.7`, `§4.9`).
+///
+/// Holds `Arc<dyn _>` repository + provider dependencies (`SERVICE-DI-1`); all
+/// `db.*` lives in the repositories.
+pub struct FundService {
+    funds: Arc<dyn FundRepository>,
+    transactions: Arc<dyn TransactionRepository>,
+    budgets: Arc<dyn BudgetRepository>,
+    uow: Arc<dyn UowProvider>,
+}
+
+impl FundService {
+    /// Wire the service from its dependencies (`SERVICE-DI-1`).
+    #[must_use]
+    pub fn new(
+        funds: Arc<dyn FundRepository>,
+        transactions: Arc<dyn TransactionRepository>,
+        budgets: Arc<dyn BudgetRepository>,
+        uow: Arc<dyn UowProvider>,
+    ) -> Self {
+        Self {
+            funds,
+            transactions,
+            budgets,
+            uow,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 1. Fund contributions (BUDGET-FUND-EARMARK-1 / D6)
+    // -----------------------------------------------------------------------
+
+    /// Contribute `amount` (a positive magnitude) INTO a buffer or surplus fund
+    /// from a month's spendable budget (`BUDGET-FUND-EARMARK-1` / D6).
+    ///
+    /// Atomically (`SERVICE-TX-1`):
+    ///   - posts an expense transaction for `-amount` against `earmark_category_id`
+    ///     — a fund-bound category that
+    ///     [`budget_domain::predicates::counts_in_month_expense_remaining`]
+    ///     excludes from the rolling-Other net, so the earmarked dollar reduces
+    ///     free-to-spend and is counted exactly once (never again as Other
+    ///     surplus), and
+    ///   - increments the fund balance by `amount`.
+    ///
+    /// `earmark_category_id` must be the fund-bound category the caller designates
+    /// (the SAME exclusion seam the sinking accrual uses); the month-lifecycle
+    /// netting treats any transaction assigned to a fund category as earmarked.
+    ///
+    /// # Errors
+    /// [`DomainError`] if the fund is absent, `amount` is not positive, or on any
+    /// persistence failure.
+    pub async fn contribute(
+        &self,
+        fund_id: FundId,
+        month_id: MonthId,
+        earmark_category_id: CategoryId,
+        amount: Money,
+        date: NaiveDate,
+        now: DateTime<Utc>,
+    ) -> Result<Fund, DomainError> {
+        if !amount.is_positive() {
+            return Err(DomainError::Invariant(
+                "fund contribution amount must be positive".to_owned(),
+            ));
+        }
+        let mut fund = self.load_fund(fund_id).await?;
+
+        // The contribution is an EXPENSE against the month (negative amount) on a
+        // fund-bound category so it is excluded from the rollover net
+        // (BUDGET-FUND-EARMARK-1).
+        let txn = Transaction {
+            id: TransactionId::generate(),
+            user_id: fund.user_id,
+            month_id,
+            category_id: Some(earmark_category_id),
+            account_id: None,
+            date,
+            amount: -amount,
+            description: format!("Contribution to fund {}", fund.name),
+            source: TransactionSource::Manual,
+            plaid_transaction_id: None,
+            status: TransactionStatus::Settled,
+            income_kind: None,
+            is_rollover: false,
+            created_at: now,
+            updated_at: now,
+        };
+        fund.balance += amount;
+
+        let transactions = Arc::clone(&self.transactions);
+        let funds = Arc::clone(&self.funds);
+        let saved = fund.clone();
+        self.uow
+            .run(move |uow: &dyn UnitOfWork| {
+                Box::pin(async move {
+                    transactions.save(&txn, Some(uow)).await?;
+                    funds.save(&saved, Some(uow)).await?;
+                    Ok(())
+                })
+            })
+            .await?;
+        Ok(fund)
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. Large-purchase resolution (D7)
+    // -----------------------------------------------------------------------
+
+    /// Record a large purchase, resolving it one of three ways at purchase time
+    /// (`SPEC §4.9` D7).
+    ///
+    /// `price` is the positive purchase magnitude. The resolution decides the
+    /// bookkeeping:
+    ///   - [`LargePurchaseResolution::PayInFull`] — an ordinary `-price` expense.
+    ///   - [`LargePurchaseResolution::PayThroughSurplus`] — draws the surplus fund
+    ///     down; the purchase transaction is a fund-draw assigned to
+    ///     `earmark_category_id` (excluded from the net, reusing the sinking-payout
+    ///     exclusion + `BUDGET-NO-DOUBLE-CHARGE-1`); NO repayment.
+    ///   - [`LargePurchaseResolution::BufferFinanced`] — the full-price `-price`
+    ///     transaction posts for TRACKING with ZERO month-budget impact (excluded
+    ///     because it is referenced by the repayment obligation we create), the
+    ///     buffer is drawn down to front the cash, and an obligation with
+    ///     `installment_amount` x `months_remaining` is created
+    ///     (`BUDGET-NO-DOUBLE-CHARGE-1`).
+    ///
+    /// Returns the created purchase transaction id (so callers can show the
+    /// tracking row / wire it into the obligation).
+    ///
+    /// # Errors
+    /// [`DomainError`] on a missing/wrong-kind fund, a non-positive price or month
+    /// count, or any persistence failure.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_large_purchase(
+        &self,
+        user_id: UserId,
+        month_id: MonthId,
+        earmark_category_id: CategoryId,
+        price: Money,
+        description: String,
+        date: NaiveDate,
+        resolution: LargePurchaseResolution,
+        now: DateTime<Utc>,
+    ) -> Result<TransactionId, DomainError> {
+        if !price.is_positive() {
+            return Err(DomainError::Invariant(
+                "large-purchase price must be positive".to_owned(),
+            ));
+        }
+        match resolution {
+            LargePurchaseResolution::PayInFull => {
+                let txn = purchase_txn(
+                    user_id,
+                    month_id,
+                    Some(earmark_category_id),
+                    price,
+                    description,
+                    date,
+                    now,
+                );
+                let id = txn.id;
+                let transactions = Arc::clone(&self.transactions);
+                self.uow
+                    .run(move |uow: &dyn UnitOfWork| {
+                        Box::pin(async move {
+                            transactions.save(&txn, Some(uow)).await?;
+                            Ok(())
+                        })
+                    })
+                    .await?;
+                Ok(id)
+            }
+            LargePurchaseResolution::PayThroughSurplus(fund_id) => {
+                self.draw_through_surplus(
+                    user_id,
+                    fund_id,
+                    month_id,
+                    earmark_category_id,
+                    price,
+                    description,
+                    date,
+                    now,
+                )
+                .await
+            }
+            LargePurchaseResolution::BufferFinanced { fund_id, months } => {
+                self.buffer_finance(
+                    user_id,
+                    fund_id,
+                    month_id,
+                    price,
+                    description,
+                    date,
+                    months,
+                    now,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Draw a surplus fund down to cover a pre-saved purchase (`SPEC §4.9`): the
+    /// purchase posts as a fund-draw on the fund-bound category (excluded from the
+    /// net) and the fund balance is reduced; NO repayment.
+    #[allow(clippy::too_many_arguments)]
+    async fn draw_through_surplus(
+        &self,
+        user_id: UserId,
+        fund_id: FundId,
+        month_id: MonthId,
+        earmark_category_id: CategoryId,
+        price: Money,
+        description: String,
+        date: NaiveDate,
+        now: DateTime<Utc>,
+    ) -> Result<TransactionId, DomainError> {
+        let mut fund = self.load_fund(fund_id).await?;
+        if fund.compulsory_repayment {
+            return Err(DomainError::Invariant(
+                "pay_through_surplus requires a surplus fund (compulsory_repayment=false)"
+                    .to_owned(),
+            ));
+        }
+        // The purchase is a fund-DRAW on a fund-bound category: excluded from the
+        // rolling-Other net (reuses BUDGET-NO-DOUBLE-CHARGE-1 + sinking-payout
+        // logic) — it was already funded by the earlier surplus contributions, so
+        // it is NOT a re-charged budget expense.
+        let txn = purchase_txn(
+            user_id,
+            month_id,
+            Some(earmark_category_id),
+            price,
+            description,
+            date,
+            now,
+        );
+        let id = txn.id;
+        fund.balance -= price;
+
+        let transactions = Arc::clone(&self.transactions);
+        let funds = Arc::clone(&self.funds);
+        self.uow
+            .run(move |uow: &dyn UnitOfWork| {
+                Box::pin(async move {
+                    transactions.save(&txn, Some(uow)).await?;
+                    funds.save(&fund, Some(uow)).await?;
+                    Ok(())
+                })
+            })
+            .await?;
+        Ok(id)
+    }
+
+    /// Buffer-finance a large purchase (`SPEC §4.9` D7): the full-price
+    /// transaction posts for TRACKING with zero month-budget impact, the buffer is
+    /// drawn down to front the cash, and a repayment obligation is created so the
+    /// compulsory installments flow back into the buffer.
+    #[allow(clippy::too_many_arguments)]
+    async fn buffer_finance(
+        &self,
+        user_id: UserId,
+        fund_id: FundId,
+        month_id: MonthId,
+        price: Money,
+        description: String,
+        date: NaiveDate,
+        months: i32,
+        now: DateTime<Utc>,
+    ) -> Result<TransactionId, DomainError> {
+        if months <= 0 {
+            return Err(DomainError::Invariant(
+                "buffer-financed repayment must span at least one month".to_owned(),
+            ));
+        }
+        let mut fund = self.load_fund(fund_id).await?;
+        if !fund.compulsory_repayment {
+            return Err(DomainError::Invariant(
+                "buffer_financed requires a buffer fund (compulsory_repayment=true)".to_owned(),
+            ));
+        }
+
+        // The full-price tracking transaction: uncategorized so it never lands in
+        // a category bucket, and excluded from the month expense-remaining because
+        // it is referenced by the obligation below (the buffer fronted the cash).
+        // SPEC §4.9 D7 — this is exactly what stops the full price from blowing up
+        // its month.
+        let txn = purchase_txn(user_id, month_id, None, price, description, date, now);
+        let txn_id = txn.id;
+
+        // The buffer fronts the cash: draw it down now. The installments restore
+        // it back to target.
+        fund.balance -= price;
+
+        // SPEC §4.9 D7: installment = price / months, rounded to cents; the final
+        // installment absorbs any rounding remainder so the sum is exact.
+        let months_u = u32::try_from(months).unwrap_or(1);
+        let installment = price.divide_into(months_u);
+
+        let obligation = RepaymentObligation {
+            id: RepaymentObligationId::generate(),
+            user_id,
+            fund_id,
+            transaction_id: txn_id,
+            total_amount: price,
+            remaining_amount: price,
+            installment_amount: installment,
+            months_remaining: months,
+            status: ObligationStatus::Active,
+            created_at: now,
+        };
+
+        let transactions = Arc::clone(&self.transactions);
+        let funds = Arc::clone(&self.funds);
+        self.uow
+            .run(move |uow: &dyn UnitOfWork| {
+                Box::pin(async move {
+                    // Insert the tracking txn FIRST so the obligation's
+                    // transaction_id FK is satisfiable, then draw the buffer, then
+                    // create the obligation — one atomic unit (SERVICE-TX-1).
+                    transactions.save(&txn, Some(uow)).await?;
+                    funds.save(&fund, Some(uow)).await?;
+                    funds.save_obligation(&obligation, Some(uow)).await?;
+                    Ok(())
+                })
+            })
+            .await?;
+        Ok(txn_id)
+    }
+
+    /// Post one compulsory buffer-repayment installment for `obligation_id`
+    /// (`SPEC §4.9` D7).
+    ///
+    /// Atomically (`SERVICE-TX-1`):
+    ///   - posts the installment as a month-budget expense on `earmark_category_id`
+    ///     — a fund-bound category, so it reduces free-to-spend but is excluded
+    ///     from the rolling-Other net (`BUDGET-FUND-EARMARK-1`: money flowing back
+    ///     INTO the buffer is an earmark, counted once),
+    ///   - restores the buffer balance by the installment, and
+    ///   - decrements the obligation's remaining + months; when `remaining`
+    ///     reaches zero the obligation flips to `paid`.
+    ///
+    /// The last installment is clamped to the exact remaining amount so rounding
+    /// never leaves a residual cent or overshoots the total.
+    ///
+    /// # Errors
+    /// [`DomainError`] if the obligation is absent or already paid, or on any
+    /// persistence failure.
+    pub async fn post_installment(
+        &self,
+        obligation_id: RepaymentObligationId,
+        month_id: MonthId,
+        earmark_category_id: CategoryId,
+        date: NaiveDate,
+        now: DateTime<Utc>,
+    ) -> Result<RepaymentObligation, DomainError> {
+        let mut obligation = self
+            .funds
+            .find_obligation(obligation_id)
+            .await?
+            .ok_or_else(|| {
+                DomainError::Invariant(format!("obligation {obligation_id} not found"))
+            })?;
+        if obligation.status == ObligationStatus::Paid || obligation.remaining_amount.is_zero() {
+            return Err(DomainError::IllegalState(
+                "obligation already fully repaid".to_owned(),
+            ));
+        }
+        let mut fund = self.load_fund(obligation.fund_id).await?;
+
+        // Clamp the FINAL installment to the exact remaining so the sum of
+        // installments equals the total to the cent: the rounding remainder lands
+        // on the last payment (e.g. $100/3 = $33.33 x 2 + $33.34). "Final" is the
+        // last scheduled month (`months_remaining <= 1`) or any month where the
+        // flat installment would meet/exceed what is left.
+        let is_final = obligation.months_remaining <= 1
+            || obligation.installment_amount.as_decimal()
+                >= obligation.remaining_amount.as_decimal();
+        let pay = if is_final {
+            obligation.remaining_amount
+        } else {
+            obligation.installment_amount
+        };
+
+        // The installment is a month-budget EXPENSE flowing back into the buffer:
+        // negative amount on a fund-bound category -> excluded from the rollover
+        // net (BUDGET-FUND-EARMARK-1) but reduces free-to-spend this month.
+        let txn = Transaction {
+            id: TransactionId::generate(),
+            user_id: obligation.user_id,
+            month_id,
+            category_id: Some(earmark_category_id),
+            account_id: None,
+            date,
+            amount: -pay,
+            description: "Buffer repayment installment".to_owned(),
+            source: TransactionSource::Manual,
+            plaid_transaction_id: None,
+            status: TransactionStatus::Settled,
+            income_kind: None,
+            is_rollover: false,
+            created_at: now,
+            updated_at: now,
+        };
+
+        fund.balance += pay;
+        obligation.remaining_amount -= pay;
+        obligation.months_remaining = (obligation.months_remaining - 1).max(0);
+        if obligation.remaining_amount.is_zero() {
+            obligation.status = ObligationStatus::Paid;
+            obligation.months_remaining = 0;
+        }
+
+        let transactions = Arc::clone(&self.transactions);
+        let funds = Arc::clone(&self.funds);
+        let saved_fund = fund.clone();
+        let saved_obligation = obligation.clone();
+        self.uow
+            .run(move |uow: &dyn UnitOfWork| {
+                Box::pin(async move {
+                    transactions.save(&txn, Some(uow)).await?;
+                    funds.save(&saved_fund, Some(uow)).await?;
+                    funds.save_obligation(&saved_obligation, Some(uow)).await?;
+                    Ok(())
+                })
+            })
+            .await?;
+        Ok(obligation)
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. Sinking funds (SPEC §4.7)
+    // -----------------------------------------------------------------------
+
+    /// Accrue one month's reserve into a sinking-fund category's virtual envelope
+    /// (`SPEC §4.7`).
+    ///
+    /// The monthly accrual is `amount / period_months`
+    /// ([`Category::accrual_per_month`]). It is:
+    ///   - added to the carried-over `Category::fund_balance` (the envelope
+    ///     carries forward month to month, unlike a normal category that resets),
+    ///     and
+    ///   - posted as an expense transaction on the sinking category so it reduces
+    ///     free-to-spend and is excluded from the rolling-Other net
+    ///     (`BUDGET-FUND-EARMARK-1`).
+    ///
+    /// Atomically (`SERVICE-TX-1`): the category balance bump and the contribution
+    /// transaction commit together.
+    ///
+    /// # Errors
+    /// [`DomainError`] if the category is not a sinking fund or on any persistence
+    /// failure.
+    pub async fn accrue_sinking_fund(
+        &self,
+        category_id: CategoryId,
+        month_id: MonthId,
+        user_id: UserId,
+        date: NaiveDate,
+        now: DateTime<Utc>,
+    ) -> Result<Category, DomainError> {
+        let mut category = self.load_category(category_id).await?;
+        if !category.is_sinking_fund() {
+            return Err(DomainError::Invariant(format!(
+                "category {category_id} is not a sinking fund; cannot accrue"
+            )));
+        }
+        let accrual = category.accrual_per_month();
+        if !accrual.is_positive() {
+            // Nothing to accrue (zero-budget sinking fund); no-op rather than a
+            // zero-amount transaction.
+            return Ok(category);
+        }
+        category.fund_balance += accrual;
+
+        let txn = Transaction {
+            id: TransactionId::generate(),
+            user_id,
+            month_id,
+            category_id: Some(category_id),
+            account_id: None,
+            date,
+            amount: -accrual,
+            description: format!("Sinking-fund accrual: {}", category.name),
+            source: TransactionSource::Manual,
+            plaid_transaction_id: None,
+            status: TransactionStatus::Settled,
+            income_kind: None,
+            is_rollover: false,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let transactions = Arc::clone(&self.transactions);
+        let budgets = Arc::clone(&self.budgets);
+        let saved_category = category.clone();
+        self.uow
+            .run(move |uow: &dyn UnitOfWork| {
+                Box::pin(async move {
+                    transactions.save(&txn, Some(uow)).await?;
+                    budgets.save_category(&saved_category, Some(uow)).await?;
+                    Ok(())
+                })
+            })
+            .await?;
+        Ok(category)
+    }
+
+    /// Tag a real bill as the sinking-fund payout (`SPEC §4.7` reset-on-payment).
+    ///
+    /// When the periodic bill lands, the user tags that transaction as the payout.
+    /// This:
+    ///   - draws the reserve (`Category::fund_balance`) down by `paid_amount`, and
+    ///   - **resets the accrual clock forward**: `next_due_date` advances from the
+    ///     payment date toward the next occurrence (one `effective_period_months`
+    ///     ahead) so accrual is forward-looking — you save for the FUTURE
+    ///     occurrence, not the past one.
+    ///
+    /// The payout transaction itself is assigned to the sinking category, so it is
+    /// excluded from the rolling-Other net (reuses the sinking exclusion +
+    /// `BUDGET-NO-DOUBLE-CHARGE-1`: it is a fund-draw, not a re-charged budget
+    /// expense — the reserve already earmarked the money).
+    ///
+    /// `paid_amount` is the positive bill magnitude; the reserve may go negative if
+    /// the bill exceeds what was accrued (under-saved), which surfaces as a
+    /// shortfall the next accrual catches up.
+    ///
+    /// # Errors
+    /// [`DomainError`] if the category is not a sinking fund, the payout
+    /// transaction is absent / mismatched, or on any persistence failure.
+    pub async fn tag_sinking_payout(
+        &self,
+        category_id: CategoryId,
+        payout_transaction_id: TransactionId,
+        paid_amount: Money,
+        payment_date: NaiveDate,
+        now: DateTime<Utc>,
+    ) -> Result<Category, DomainError> {
+        if !paid_amount.is_positive() {
+            return Err(DomainError::Invariant(
+                "sinking payout amount must be positive".to_owned(),
+            ));
+        }
+        let mut category = self.load_category(category_id).await?;
+        if !category.is_sinking_fund() {
+            return Err(DomainError::Invariant(format!(
+                "category {category_id} is not a sinking fund; cannot tag a payout"
+            )));
+        }
+
+        let mut payout = self
+            .transactions
+            .find_by_id(payout_transaction_id)
+            .await?
+            .ok_or_else(|| {
+                DomainError::Invariant(format!(
+                    "payout transaction {payout_transaction_id} not found"
+                ))
+            })?;
+        // Assign the real bill to the sinking category so it is excluded from the
+        // rolling-Other net (the reserve, not this month's cash, covers it).
+        payout.category_id = Some(category_id);
+        payout.updated_at = now;
+
+        // Draw the reserve down.
+        category.fund_balance -= paid_amount;
+        // Reset-on-payment: re-anchor the next occurrence forward from the payment
+        // date by one full period, so accrual now targets the NEXT bill.
+        category.next_due_date = Some(advance_months(
+            payment_date,
+            category.effective_period_months(),
+        ));
+
+        let transactions = Arc::clone(&self.transactions);
+        let budgets = Arc::clone(&self.budgets);
+        let saved_category = category.clone();
+        self.uow
+            .run(move |uow: &dyn UnitOfWork| {
+                Box::pin(async move {
+                    transactions.save(&payout, Some(uow)).await?;
+                    budgets.save_category(&saved_category, Some(uow)).await?;
+                    Ok(())
+                })
+            })
+            .await?;
+        Ok(category)
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. Buffer health — advisory only (SPEC §4.9)
+    // -----------------------------------------------------------------------
+
+    /// Compute the advisory buffer-health verdict for `fund` (`SPEC §4.9`).
+    ///
+    /// This is a judgment AID, never enforcement: above target -> excess to invest
+    /// externally; below target with outstanding obligations -> caution before
+    /// stacking another large draw. It NEVER blocks — callers surface it for
+    /// Zach's judgment and do nothing else.
+    ///
+    /// `has_outstanding_obligations` is the caller's read of
+    /// [`FundRepository::list_active_obligations`] for the user (passed in so this
+    /// stays a pure function over already-fetched data).
+    ///
+    /// Returns [`BufferHealth::OnTarget`] for any non-buffer fund or a buffer with
+    /// no target set — there is nothing to flag.
+    #[must_use]
+    pub fn buffer_health(fund: &Fund, has_outstanding_obligations: bool) -> BufferHealth {
+        if fund.kind != FundKind::Buffer {
+            return BufferHealth::OnTarget;
+        }
+        let Some(target) = fund.target_balance else {
+            return BufferHealth::OnTarget;
+        };
+        match fund.balance.cmp(&target) {
+            std::cmp::Ordering::Greater => BufferHealth::AboveTarget(fund.balance - target),
+            std::cmp::Ordering::Less => {
+                let shortfall = target - fund.balance;
+                if has_outstanding_obligations {
+                    BufferHealth::BelowTargetWithObligations(shortfall)
+                } else {
+                    BufferHealth::BelowTarget(shortfall)
+                }
+            }
+            std::cmp::Ordering::Equal => BufferHealth::OnTarget,
+        }
+    }
+
+    /// Fetch the advisory buffer-health verdict for a fund, reading the user's
+    /// active obligations to decide the below-target branch (`SPEC §4.9`).
+    ///
+    /// A thin async wrapper over the pure [`Self::buffer_health`] that does the
+    /// obligation read; never blocks anything.
+    ///
+    /// # Errors
+    /// [`DomainError`] if the fund is absent or on any persistence failure.
+    pub async fn buffer_health_for(&self, fund_id: FundId) -> Result<BufferHealth, DomainError> {
+        let fund = self.load_fund(fund_id).await?;
+        let has_obligations = !self
+            .funds
+            .list_active_obligations(fund.user_id)
+            .await?
+            .is_empty();
+        Ok(Self::buffer_health(&fund, has_obligations))
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal helpers
+    // -----------------------------------------------------------------------
+
+    async fn load_fund(&self, fund_id: FundId) -> Result<Fund, DomainError> {
+        self.funds
+            .find_by_id(fund_id)
+            .await?
+            .ok_or_else(|| DomainError::Invariant(format!("fund {fund_id} not found")))
+    }
+
+    async fn load_category(&self, category_id: CategoryId) -> Result<Category, DomainError> {
+        self.budgets
+            .find_category(category_id)
+            .await?
+            .ok_or_else(|| DomainError::Invariant(format!("category {category_id} not found")))
+    }
+}
+
+/// Build a `-price` expense transaction for a large purchase. `category_id`
+/// `None` is the uncategorized buffer-financed tracking row; `Some` is the
+/// pay-in-full / surplus-draw category assignment.
+#[allow(clippy::too_many_arguments)]
+fn purchase_txn(
+    user_id: UserId,
+    month_id: MonthId,
+    category_id: Option<CategoryId>,
+    price: Money,
+    description: String,
+    date: NaiveDate,
+    now: DateTime<Utc>,
+) -> Transaction {
+    Transaction {
+        id: TransactionId::generate(),
+        user_id,
+        month_id,
+        category_id,
+        account_id: None,
+        date,
+        amount: -price,
+        description,
+        source: TransactionSource::Manual,
+        plaid_transaction_id: None,
+        status: TransactionStatus::Settled,
+        income_kind: None,
+        is_rollover: false,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+/// Advance `date` forward by `months` calendar months, clamping the day to the
+/// target month's length (e.g. Jan 31 + 1 month -> Feb 28/29). Used by
+/// reset-on-payment to re-anchor a sinking fund's `next_due_date` (`SPEC §4.7`).
+#[must_use]
+fn advance_months(date: NaiveDate, months: u32) -> NaiveDate {
+    // chrono::Months clamps the day to the target month's length (e.g.
+    // Jan 31 + 1 month -> Feb 28/29) and handles year wrap; falls back to the
+    // unchanged date in the impossible overflow case.
+    date.checked_add_months(chrono::Months::new(months))
+        .unwrap_or(date)
+}
+
+#[cfg(test)]
+mod tests;

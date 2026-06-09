@@ -8,11 +8,12 @@
 //! (`SPEC §4.9`).
 
 use async_trait::async_trait;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+use uuid::Uuid;
 
 use budget_domain::RepositoryError;
 use budget_domain::fund::Fund;
-use budget_domain::ids::{FundId, RepaymentObligationId, UserId};
+use budget_domain::ids::{FundId, RepaymentObligationId, TransactionId, UserId};
 use budget_domain::repayment_obligation::RepaymentObligation;
 use budget_domain::repositories::FundRepository;
 use budget_domain::uow::UnitOfWork;
@@ -106,6 +107,40 @@ impl FundRepository for PostgresFundRepository {
             .into_iter()
             .map(|m| repayment_obligations_mapper::model_to_domain(m).map_err(map_read))
             .collect()
+    }
+
+    async fn find_obligation_for_transaction(
+        &self,
+        transaction_id: TransactionId,
+    ) -> Result<Option<RepaymentObligation>, RepositoryError> {
+        let model = repayment_obligations::Entity::find()
+            .filter(repayment_obligations::Column::TransactionId.eq(transaction_id.value()))
+            .one(&self.db)
+            .await
+            .map_err(map_db_err)?;
+        model
+            .map(repayment_obligations_mapper::model_to_domain)
+            .transpose()
+            .map_err(map_read)
+    }
+
+    async fn list_buffer_financed_transaction_ids(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<TransactionId>, RepositoryError> {
+        // Every obligation's transaction_id, active OR paid — the full-price
+        // buffer-financed rows stay excluded permanently (SPEC §4.9 D7). Selecting
+        // only the id column avoids materialising the whole row; backed by
+        // ix_repayment_obligations_user_id.
+        let ids = repayment_obligations::Entity::find()
+            .filter(repayment_obligations::Column::UserId.eq(user_id.value()))
+            .select_only()
+            .column(repayment_obligations::Column::TransactionId)
+            .into_tuple::<Uuid>()
+            .all(&self.db)
+            .await
+            .map_err(map_db_err)?;
+        Ok(ids.into_iter().map(TransactionId::new).collect())
     }
 
     async fn save_obligation(

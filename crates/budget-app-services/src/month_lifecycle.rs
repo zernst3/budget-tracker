@@ -61,8 +61,10 @@ use budget_domain::error::DomainError;
 use budget_domain::ids::{MonthId, UserId};
 use budget_domain::money::Money;
 use budget_domain::month::Month;
-use budget_domain::predicates::counts_in_budget;
-use budget_domain::repositories::{BudgetRepository, MonthRepository, TransactionRepository};
+use budget_domain::predicates::{counts_in_budget, counts_in_month_expense_remaining};
+use budget_domain::repositories::{
+    BudgetRepository, FundRepository, MonthRepository, TransactionRepository,
+};
 use budget_domain::transaction::Transaction;
 use budget_domain::uow::{UnitOfWork, UowProvider, UowProviderExt};
 
@@ -73,14 +75,17 @@ use crate::income::IncomeExpectation;
 ///
 /// "Remaining" here is the *signed actual spend* counted toward budget math.
 /// Each transaction contributes its signed `amount` (expense negative, inflow
-/// positive) iff [`counts_in_budget`] is `true` for its status
-/// (`BUDGET-STATUS-DRIVES-INCLUSION-1`), with three exclusions that the D5 net
-/// handles in its other terms or not at all:
+/// positive) iff [`counts_in_month_expense_remaining`] is `true`
+/// (`BUDGET-STATUS-DRIVES-INCLUSION-1` + `BUDGET-FUND-EARMARK-1`), with these
+/// exclusions that the D5 net handles in its other terms or not at all:
 ///   - **income rows** (`income_kind` set) — they belong to the
 ///     `(actual_income - expected_income)` term, not here;
-///   - **fund-contribution rows** — money moved into a sinking fund / buffer is
-///     already an expense against the month and is excluded from the net so the
-///     earmarked dollar is counted once (`BUDGET-FUND-EARMARK-1`);
+///   - **fund-contribution rows** — money moved into a sinking fund / buffer /
+///     surplus is already an expense against the month and is excluded from the
+///     net so the earmarked dollar is counted once (`BUDGET-FUND-EARMARK-1`);
+///   - **buffer-financed full-price rows** — a buffer-financed purchase posts for
+///     tracking only with zero month-budget impact; the budget effect is its
+///     installments, so the full-price row is excluded (`SPEC §4.9` D7);
 ///   - the **rollover row of *this* month** is naturally part of the prior
 ///     chain when present, and IS included: it is a real signed line item in
 ///     Other, exactly the auditable carryover (`BUDGET-ROLLOVER-INTEGRITY-1`).
@@ -88,22 +93,23 @@ use crate::income::IncomeExpectation;
 /// `fund_category_ids` is the set of category ids in the month's budget version
 /// whose category is a sinking fund (`Category::is_sinking_fund`); a transaction
 /// assigned to one of those categories is a fund contribution when its amount is
-/// an outflow.
+/// an outflow. `buffer_financed_txn_ids` is the set of buffer-financed full-price
+/// purchase transactions (`SPEC §4.9` D7), which post for tracking only and carry
+/// zero month-budget impact.
+///
+/// Both exclusions are decided by the single
+/// [`counts_in_month_expense_remaining`] domain predicate so the netting here and
+/// the fund service (build step 5) cannot drift.
 #[must_use]
 fn expense_remaining_sum(
     transactions: &[Transaction],
     fund_category_ids: &[budget_domain::ids::CategoryId],
+    buffer_financed_txn_ids: &[budget_domain::ids::TransactionId],
 ) -> Money {
     transactions
         .iter()
-        .filter(|t| counts_in_budget(t.status))
-        // Income belongs to the (actual - expected) term, not the expense sum.
-        .filter(|t| !t.is_income())
-        // BUDGET-FUND-EARMARK-1: fund contributions are already expensed; they
-        // are excluded from the net so the dollar is counted exactly once.
         .filter(|t| {
-            t.category_id
-                .is_none_or(|cid| !fund_category_ids.contains(&cid))
+            counts_in_month_expense_remaining(t, fund_category_ids, buffer_financed_txn_ids)
         })
         .map(|t| t.amount)
         .sum()
@@ -149,6 +155,7 @@ pub struct MonthLifecycleService {
     months: Arc<dyn MonthRepository>,
     budgets: Arc<dyn BudgetRepository>,
     transactions: Arc<dyn TransactionRepository>,
+    funds: Arc<dyn FundRepository>,
     uow: Arc<dyn UowProvider>,
     income: Arc<dyn IncomeExpectation>,
 }
@@ -160,6 +167,7 @@ impl MonthLifecycleService {
         months: Arc<dyn MonthRepository>,
         budgets: Arc<dyn BudgetRepository>,
         transactions: Arc<dyn TransactionRepository>,
+        funds: Arc<dyn FundRepository>,
         uow: Arc<dyn UowProvider>,
         income: Arc<dyn IncomeExpectation>,
     ) -> Self {
@@ -167,6 +175,7 @@ impl MonthLifecycleService {
             months,
             budgets,
             transactions,
+            funds,
             uow,
             income,
         }
@@ -343,9 +352,18 @@ impl MonthLifecycleService {
 
         let txns = self.transactions.list_for_month(prior.id).await?;
 
+        // SPEC §4.9 D7: buffer-financed full-price purchases post for tracking
+        // only with zero month-budget impact; they are excluded from the expense
+        // sum so they never blow up their month. The installments (ordinary
+        // expenses) are included and net normally.
+        let buffer_financed_txn_ids = self
+            .funds
+            .list_buffer_financed_transaction_ids(user_id)
+            .await?;
+
         let actual_income = actual_income_sum(&txns);
         let expected_income = self.income.expected_income(user_id, py, pm);
-        let expense_remaining = expense_remaining_sum(&txns, &fund_ids);
+        let expense_remaining = expense_remaining_sum(&txns, &fund_ids, &buffer_financed_txn_ids);
 
         Ok(net_leftover(
             actual_income,
