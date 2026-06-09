@@ -109,6 +109,11 @@ uuid_newtype!(
     /// Identifies a [`crate::paycheck_config::PaycheckConfig`].
     PaycheckConfigId
 );
+uuid_newtype!(
+    /// Identifies a [`crate::auth::WebauthnCredential`] (a passkey / device,
+    /// `SPEC §5` / `§9.1`, `BUDGET-AUTH-GATE-1`).
+    WebauthnCredentialId
+);
 
 #[cfg(test)]
 mod tests {

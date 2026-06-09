@@ -12,6 +12,7 @@
 //!   - [`funds`] — buffer/surplus virtual envelopes (SPEC §4.9)
 //!   - [`repayment_obligations`] — buffer-draw repayment schedule (SPEC §4.9)
 //!   - [`paycheck_config`] — income setup; one per user (SPEC §4.8)
+//!   - [`webauthn_credentials`] — passkeys / biometric login; one user, many devices (SPEC §5, §9.1; `BUDGET-AUTH-GATE-1`)
 //!
 //! Pure data shape — no business logic, no DTOs, no serde on `Model` (`ENTITIES-2`).
 //! NUMERIC money columns map to `rust_decimal::Decimal` (`BUDGET-MONEY-1`), never to
@@ -27,3 +28,4 @@ pub mod plaid_items;
 pub mod repayment_obligations;
 pub mod transactions;
 pub mod users;
+pub mod webauthn_credentials;

@@ -12,7 +12,8 @@
 //! Per ENTITIES-4 the inverse relations are declared on this side:
 //!   - `has_many Budgets`, `has_many Accounts`, `has_many PlaidItems`,
 //!     `has_many Months`, `has_many Transactions`, `has_many Funds`,
-//!     `has_many RepaymentObligations`, `has_one PaycheckConfig`.
+//!     `has_many RepaymentObligations`, `has_one PaycheckConfig`,
+//!     `has_many WebauthnCredentials`.
 
 use sea_orm::entity::prelude::*;
 
@@ -48,6 +49,8 @@ pub enum Relation {
     RepaymentObligations,
     #[sea_orm(has_one = "super::paycheck_config::Entity")]
     PaycheckConfig,
+    #[sea_orm(has_many = "super::webauthn_credentials::Entity")]
+    WebauthnCredentials,
 }
 
 impl Related<super::budgets::Entity> for Entity {
@@ -95,6 +98,12 @@ impl Related<super::repayment_obligations::Entity> for Entity {
 impl Related<super::paycheck_config::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::PaycheckConfig.def()
+    }
+}
+
+impl Related<super::webauthn_credentials::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::WebauthnCredentials.def()
     }
 }
 

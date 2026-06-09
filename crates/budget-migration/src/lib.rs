@@ -41,6 +41,7 @@
 pub use sea_orm_migration::prelude::*;
 
 mod m0001_genesis_schema;
+mod m0002_auth_schema;
 
 /// The ordered migration list run by the server at startup.
 ///
@@ -51,7 +52,10 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(m0001_genesis_schema::Migration)]
+        vec![
+            Box::new(m0001_genesis_schema::Migration),
+            Box::new(m0002_auth_schema::Migration),
+        ]
     }
 }
 

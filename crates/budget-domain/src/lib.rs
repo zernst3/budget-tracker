@@ -20,6 +20,7 @@
 //! get their own module and re-export through this root.
 
 pub mod account;
+pub mod auth;
 pub mod budget;
 pub mod category;
 pub mod enums;
@@ -43,6 +44,10 @@ pub mod validated;
 // etc. without the module path. Aggregate structs, IDs, enums, errors, the Money
 // type, the predicates, and the repository + UoW traits are all surfaced here.
 pub use account::Account;
+pub use auth::{
+    AuthError, PasswordHasher, SecretVault, TotpEnrollment, TotpService, WebauthnCredential,
+    WebauthnCredentialRepository,
+};
 pub use budget::Budget;
 pub use category::Category;
 pub use enums::{
@@ -54,7 +59,7 @@ pub use error::{DomainError, RepositoryError, ValidationError};
 pub use fund::Fund;
 pub use ids::{
     AccountId, BudgetId, CategoryId, CategoryKey, FundId, MonthId, PaycheckConfigId, PlaidItemId,
-    RepaymentObligationId, TransactionId, UserId,
+    RepaymentObligationId, TransactionId, UserId, WebauthnCredentialId,
 };
 pub use money::Money;
 pub use month::Month;

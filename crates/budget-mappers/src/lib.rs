@@ -42,6 +42,7 @@ pub mod plaid_items;
 pub mod repayment_obligations;
 pub mod transactions;
 pub mod users;
+pub mod webauthn_credentials;
 
 use thiserror::Error;
 
