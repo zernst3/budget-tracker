@@ -1,0 +1,83 @@
+{
+  "added": [
+    {
+      "transaction_id": "mock-txn-0001-grocery",
+      "account_id": "mock-acct-checking-001",
+      "amount": 84.30,
+      "iso_currency_code": "USD",
+      "unofficial_currency_code": null,
+      "date": "2026-06-02",
+      "authorized_date": "2026-06-02",
+      "name": "WHOLE FOODS MARKET",
+      "merchant_name": "Whole Foods Market",
+      "pending": false,
+      "pending_transaction_id": null,
+      "payment_channel": "in store"
+    },
+    {
+      "transaction_id": "mock-txn-0002-gas",
+      "account_id": "mock-acct-credit-002",
+      "amount": 47.15,
+      "iso_currency_code": "USD",
+      "unofficial_currency_code": null,
+      "date": "2026-06-03",
+      "authorized_date": "2026-06-03",
+      "name": "SHELL OIL 574213",
+      "merchant_name": "Shell",
+      "pending": false,
+      "pending_transaction_id": null,
+      "payment_channel": "in store"
+    },
+    {
+      "transaction_id": "mock-txn-0003-refund",
+      "account_id": "mock-acct-credit-002",
+      "amount": -22.99,
+      "iso_currency_code": "USD",
+      "unofficial_currency_code": null,
+      "date": "2026-06-04",
+      "authorized_date": "2026-06-04",
+      "name": "AMAZON.COM REFUND",
+      "merchant_name": "Amazon",
+      "pending": false,
+      "pending_transaction_id": null,
+      "payment_channel": "online"
+    },
+    {
+      "transaction_id": "mock-txn-0004-restaurant-pending",
+      "account_id": "mock-acct-credit-002",
+      "amount": 63.80,
+      "iso_currency_code": "USD",
+      "unofficial_currency_code": null,
+      "date": "2026-06-05",
+      "authorized_date": "2026-06-05",
+      "name": "THE LOCAL BISTRO",
+      "merchant_name": "The Local Bistro",
+      "pending": true,
+      "pending_transaction_id": null,
+      "payment_channel": "in store"
+    }
+  ],
+  "modified": [],
+  "removed": [],
+  "accounts": [
+    {
+      "account_id": "mock-acct-checking-001",
+      "name": "Mock Checking",
+      "official_name": "Mock Bank Checking Account",
+      "type": "depository",
+      "subtype": "checking",
+      "mask": "0001"
+    },
+    {
+      "account_id": "mock-acct-credit-002",
+      "name": "Mock Rewards Card",
+      "official_name": "Mock Bank Platinum Rewards Card",
+      "type": "credit",
+      "subtype": "credit card",
+      "mask": "0002"
+    }
+  ],
+  "next_cursor": "mock-cursor-after-page-1",
+  "has_more": false,
+  "request_id": "mock-req-page-1"
+}

@@ -1,0 +1,37 @@
+{
+  "added": [
+    {
+      "transaction_id": "mock-txn-0006-coffee",
+      "account_id": "mock-acct-credit-002",
+      "amount": 5.75,
+      "iso_currency_code": "USD",
+      "unofficial_currency_code": null,
+      "date": "2026-06-07",
+      "authorized_date": "2026-06-07",
+      "name": "BLUE BOTTLE COFFEE",
+      "merchant_name": "Blue Bottle Coffee",
+      "pending": false,
+      "pending_transaction_id": null,
+      "payment_channel": "in store"
+    }
+  ],
+  "modified": [],
+  "removed": [
+    {
+      "transaction_id": "mock-txn-0002-gas"
+    }
+  ],
+  "accounts": [
+    {
+      "account_id": "mock-acct-credit-002",
+      "name": "Mock Rewards Card",
+      "official_name": "Mock Bank Platinum Rewards Card",
+      "type": "credit",
+      "subtype": "credit card",
+      "mask": "0002"
+    }
+  ],
+  "next_cursor": "mock-cursor-after-page-3",
+  "has_more": false,
+  "request_id": "mock-req-page-3"
+}

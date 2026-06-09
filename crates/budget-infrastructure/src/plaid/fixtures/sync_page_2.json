@@ -1,0 +1,48 @@
+{
+  "added": [
+    {
+      "transaction_id": "mock-txn-0005-subscription",
+      "account_id": "mock-acct-credit-002",
+      "amount": 15.99,
+      "iso_currency_code": "USD",
+      "unofficial_currency_code": null,
+      "date": "2026-06-06",
+      "authorized_date": "2026-06-06",
+      "name": "NETFLIX.COM",
+      "merchant_name": "Netflix",
+      "pending": false,
+      "pending_transaction_id": null,
+      "payment_channel": "online"
+    }
+  ],
+  "modified": [
+    {
+      "transaction_id": "mock-txn-0004-restaurant-settled",
+      "account_id": "mock-acct-credit-002",
+      "amount": 71.45,
+      "iso_currency_code": "USD",
+      "unofficial_currency_code": null,
+      "date": "2026-06-05",
+      "authorized_date": "2026-06-05",
+      "name": "THE LOCAL BISTRO",
+      "merchant_name": "The Local Bistro",
+      "pending": false,
+      "pending_transaction_id": "mock-txn-0004-restaurant-pending",
+      "payment_channel": "in store"
+    }
+  ],
+  "removed": [],
+  "accounts": [
+    {
+      "account_id": "mock-acct-credit-002",
+      "name": "Mock Rewards Card",
+      "official_name": "Mock Bank Platinum Rewards Card",
+      "type": "credit",
+      "subtype": "credit card",
+      "mask": "0002"
+    }
+  ],
+  "next_cursor": "mock-cursor-after-page-2",
+  "has_more": false,
+  "request_id": "mock-req-page-2"
+}

@@ -373,8 +373,24 @@ impl TriageState {
         Ok(Self::new(triage, plaid))
     }
 
-    /// Wire the [`PlaidSyncService`] iff the credentials + vault env vars are
-    /// present; otherwise `Ok(None)`.
+    /// Wire the [`PlaidSyncService`], selecting the Plaid client + secret vault
+    /// by an explicit opt-in (`STAGE-1` local testing):
+    ///
+    /// - **`PLAID_MODE=mock`** (explicit opt-in): wire the in-process
+    ///   [`MockPlaidApi`] + [`InMemorySecretVault`] so the whole Pull -> Pending
+    ///   -> triage path runs LOCALLY with fake bank data and NO real Plaid / Neon
+    ///   / Azure. A clear `WARN` is logged at startup. Requires NO Plaid
+    ///   credentials or Key Vault URL.
+    /// - **anything else / unset** (the default/production path, unchanged): wire
+    ///   the real [`HttpPlaidApi`] + [`AzureKeyVault`] iff the credentials
+    ///   (`PLAID_CLIENT_ID` / `PLAID_SECRET`) AND the Key Vault URL
+    ///   (`KEY_VAULT_URL`) are present; otherwise `Ok(None)` and the Pull server
+    ///   function returns `503` (bank linking is a deploy-time concern).
+    ///
+    /// CRITICAL SAFETY (`STAGE-1`): the mock is OFF by default. Only the exact
+    /// string `PLAID_MODE=mock` selects it; a misconfigured prod (the var unset,
+    /// or any other value) keeps the real client + real Key Vault. The mock can
+    /// never be reached silently.
     fn wire_plaid(
         plaid_items_db: DatabaseConnection,
         plaid_months_db: DatabaseConnection,
@@ -389,31 +405,54 @@ impl TriageState {
         use budget_domain::repositories::{MonthRepository, PlaidItemRepository, UserRepository};
         use budget_domain::uow::UowProvider;
         use budget_infrastructure::{
-            AzureKeyVault, HttpPlaidApi, PlaidCredentials, PlaidEnvironment,
-            PostgresMonthRepository, PostgresPlaidItemRepository, PostgresUserRepository,
-            SeaOrmPlaidSyncEngine, SeaOrmUowProvider,
+            AzureKeyVault, HttpPlaidApi, InMemorySecretVault, MockPlaidApi, PlaidCredentials,
+            PlaidEnvironment, PostgresMonthRepository, PostgresPlaidItemRepository,
+            PostgresUserRepository, SeaOrmPlaidSyncEngine, SeaOrmUowProvider,
         };
 
-        let (Ok(client_id), Ok(secret), Ok(vault_url)) = (
-            std::env::var("PLAID_CLIENT_ID"),
-            std::env::var("PLAID_SECRET"),
-            std::env::var("KEY_VAULT_URL"),
-        ) else {
-            // Not configured: the Pull server function will 503. The inbox + triage
-            // still operate over existing rows.
-            return Ok(None);
-        };
-
-        let environment = if std::env::var("PLAID_ENV").as_deref() == Ok("production") {
-            PlaidEnvironment::Production
+        // Select the Plaid client + secret vault. The mock is reached ONLY by the
+        // exact `PLAID_MODE=mock` opt-in; every other case (incl. unset) takes the
+        // real, unchanged production path.
+        let mock_mode = std::env::var("PLAID_MODE").as_deref() == Ok("mock");
+        let (plaid_api, vault): (Arc<dyn PlaidApi>, Arc<dyn SecretVault>) = if mock_mode {
+            // One clear, loud line so an operator can never mistake a mock run for
+            // a real one. No secret material (there is none) reaches the log.
+            tracing::warn!(
+                "PLAID_MODE=mock — using the LOCAL MockPlaidApi + in-memory secret store \
+                 (fake bank data; NO real Plaid / Key Vault). This is a local-testing path; \
+                 it must NEVER be set in production."
+            );
+            (
+                Arc::new(MockPlaidApi::new()),
+                Arc::new(InMemorySecretVault::new()),
+            )
         } else {
-            PlaidEnvironment::Sandbox
-        };
-        let plaid_api: Arc<dyn PlaidApi> = Arc::new(HttpPlaidApi::with_default_client(
-            PlaidCredentials { client_id, secret },
-            environment,
-        ));
+            let (Ok(client_id), Ok(secret), Ok(vault_url)) = (
+                std::env::var("PLAID_CLIENT_ID"),
+                std::env::var("PLAID_SECRET"),
+                std::env::var("KEY_VAULT_URL"),
+            ) else {
+                // Not configured: the Pull server function will 503. The inbox +
+                // triage still operate over existing rows.
+                return Ok(None);
+            };
 
+            let environment = if std::env::var("PLAID_ENV").as_deref() == Ok("production") {
+                PlaidEnvironment::Production
+            } else {
+                PlaidEnvironment::Sandbox
+            };
+            let api: Arc<dyn PlaidApi> = Arc::new(HttpPlaidApi::with_default_client(
+                PlaidCredentials { client_id, secret },
+                environment,
+            ));
+            let vault: Arc<dyn SecretVault> =
+                Arc::new(AzureKeyVault::new(&vault_url).map_err(|e| e.to_string())?);
+            (api, vault)
+        };
+
+        // The repositories + unit-of-work wiring is identical for both paths: only
+        // the Plaid client + secret vault differ above.
         let plaid_items: Arc<dyn PlaidItemRepository> =
             Arc::new(PostgresPlaidItemRepository::new(plaid_items_db));
         let plaid_months: Arc<dyn MonthRepository> =
@@ -431,8 +470,6 @@ impl TriageState {
             Arc::clone(&plaid_items),
             engine_uow,
         ));
-        let vault: Arc<dyn SecretVault> =
-            Arc::new(AzureKeyVault::new(&vault_url).map_err(|e| e.to_string())?);
 
         Ok(Some(Arc::new(PlaidSyncService::new(
             plaid_api,

@@ -46,6 +46,11 @@ pub use uow::{SeaOrmUow, SeaOrmUowProvider};
 // + tests work against abstractions (no live Plaid call in tests).
 pub use plaid::{HttpPlaidApi, PlaidCredentials, PlaidEnvironment, SeaOrmPlaidSyncEngine};
 
+// STAGE-1 local-testing adapters (OFF by default; selected only by the explicit
+// `PLAID_MODE=mock` opt-in at the budget-ui `server_state` wiring seam). The real
+// `HttpPlaidApi` + `AzureKeyVault` remain the default/production path.
+pub use plaid::{InMemorySecretVault, MOCK_ACCESS_TOKEN, MockPlaidApi};
+
 // Auth subsystem (build step 7, BUDGET-AUTH-GATE-1): the concrete adapters of
 // the domain auth ports, the session store + cookie policy, and the AuthedUser
 // gate. The HTTP host that mounts the gate is the frontend phase.

@@ -20,7 +20,16 @@
 //! in a unit test (`SPEC §6`).
 
 mod http_client;
+mod local_secret;
+mod mock_client;
 mod sync_engine;
+mod wire;
 
 pub use http_client::{HttpPlaidApi, PlaidCredentials, PlaidEnvironment};
 pub use sync_engine::SeaOrmPlaidSyncEngine;
+
+// STAGE-1 local-testing mock (OFF by default; selected only by PLAID_MODE=mock at
+// the budget-ui wiring seam). Real-contract fidelity: the fixtures deserialize
+// through the same `wire` DTOs the live client uses.
+pub use local_secret::InMemorySecretVault;
+pub use mock_client::{MOCK_ACCESS_TOKEN, MockPlaidApi};

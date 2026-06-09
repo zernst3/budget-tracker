@@ -16,15 +16,14 @@
 //!   and are likewise never logged.
 
 use async_trait::async_trait;
-use chrono::NaiveDate;
 use reqwest::Client;
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use budget_domain::plaid_api::{
-    AccessTokenExchange, LinkToken, LinkTokenRequest, PlaidAccount, PlaidApi, PlaidError,
-    PlaidSyncPage, PlaidTransaction,
+    AccessTokenExchange, LinkToken, LinkTokenRequest, PlaidApi, PlaidError, PlaidSyncPage,
 };
+
+use super::wire::TransactionsSyncResponse;
 
 /// Which Plaid environment to target (`SPEC §6`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,65 +197,10 @@ struct PublicTokenExchangeResponse {
     item_id: String,
 }
 
-#[derive(Deserialize)]
-struct TransactionsSyncResponse {
-    added: Vec<WireTransaction>,
-    modified: Vec<WireTransaction>,
-    removed: Vec<WireRemoved>,
-    #[serde(default)]
-    accounts: Vec<WireAccount>,
-    next_cursor: String,
-    has_more: bool,
-}
-
-#[derive(Deserialize)]
-struct WireTransaction {
-    transaction_id: String,
-    account_id: String,
-    amount: Decimal,
-    date: NaiveDate,
-    name: String,
-    pending: bool,
-    #[serde(default)]
-    pending_transaction_id: Option<String>,
-}
-
-impl From<WireTransaction> for PlaidTransaction {
-    fn from(w: WireTransaction) -> Self {
-        PlaidTransaction {
-            transaction_id: w.transaction_id,
-            account_id: w.account_id,
-            amount: w.amount,
-            date: w.date,
-            name: w.name,
-            pending: w.pending,
-            pending_transaction_id: w.pending_transaction_id,
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct WireRemoved {
-    transaction_id: String,
-}
-
-#[derive(Deserialize)]
-struct WireAccount {
-    account_id: String,
-    name: String,
-    #[serde(rename = "type", default)]
-    account_type: String,
-}
-
-impl From<WireAccount> for PlaidAccount {
-    fn from(w: WireAccount) -> Self {
-        PlaidAccount {
-            account_id: w.account_id,
-            name: w.name,
-            account_type: w.account_type,
-        }
-    }
-}
+// The `/transactions/sync` response DTOs (`TransactionsSyncResponse` +
+// `WireTransaction` / `WireRemoved` / `WireAccount`) live in `super::wire` so the
+// local-dev `MockPlaidApi` deserializes its fixtures through the SAME serde path
+// the live client uses (`STAGE-1` fidelity requirement).
 
 #[derive(Deserialize)]
 struct PlaidApiError {
@@ -315,14 +259,7 @@ impl PlaidApi for HttpPlaidApi {
             cursor,
         };
         let resp: TransactionsSyncResponse = self.post("/transactions/sync", body).await?;
-        Ok(PlaidSyncPage {
-            added: resp.added.into_iter().map(Into::into).collect(),
-            modified: resp.modified.into_iter().map(Into::into).collect(),
-            removed: resp.removed.into_iter().map(|r| r.transaction_id).collect(),
-            accounts: resp.accounts.into_iter().map(Into::into).collect(),
-            next_cursor: resp.next_cursor,
-            has_more: resp.has_more,
-        })
+        Ok(resp.into())
     }
 }
 
