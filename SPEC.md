@@ -337,6 +337,8 @@ transactions
                                             -- 'pending'=Plaid-seen-unsettled, EXCLUDED (§4.4)
   matched_transaction_id→transactions?,     -- D9/§4.10: the real txn that settled this 'expected' placeholder
                                             -- (set on the placeholder row). Linked once; reversible on Plaid 'removed'
+  comment text?,              -- §7: user's free-text note on an expense, distinct from `description`
+                              -- (the Plaid/merchant string). Inline-editable in the ledger + at triage.
   is_rollover bool,           -- system-generated 1st-of-month line item
   created_at, updated_at
 
@@ -410,12 +412,44 @@ DO NOT build any multi-user features (see §9).
 
 ## 7. chorale usage (the UI)
 
-The main screen is a **transactions table** built on chorale (Zach's own library — dogfood):
-- **Grouping + aggregation (chorale v0.2.0 Item 8):** group transactions by day (and/or category),
-  show per-category aggregate amounts, expand a group to reveal the individual expenses. This is the
-  "select the day → see the specific expenses" drill-down Zach wants.
-- **In-cell editing:** assign/change a transaction's category inline (dropdown), edit amount/name.
-- **Filtering / sorting:** by date, account, category, settled/pending.
+The main screen is a **month ledger** built on chorale (Zach's own library — dogfood). **UI design
+DECIDED 2026-06-09** (Zach), detailed below.
+
+**Month ledger (the main view):**
+- **Month selector** (prev/next + the current month) at the top.
+- A **collapsible envelope-summary header** above the ledger shows, for the selected month, each
+  category's **budgeted / spent / remaining** plus the **rolling Other** balance (§4.3). This is the
+  "am I within budget" view; the daily ledger below is the "when did I spend" view. (Chosen over putting
+  per-category numbers in the ledger rows — keeps the ledger narrow.)
+- The ledger is a **chorale table with one row per DAY of the month**. Each day row shows the **day's
+  total expenses**. (Layout DECIDED 2026-06-09: day-total rows, NOT a day×category matrix.)
+- **Master/detail expand (chorale v0.2.0):** expanding a day row reveals a **sub-table of that day's
+  individual transactions**, **groupable by expense category** (category group headers carry the
+  per-category daily subtotal — this is where "total expenses per category" surfaces). This is the
+  "select the day → see the specific expenses, by category" drill-down.
+- **Editing is read-only EXCEPT two fields on a transaction (expense-item) row:** (1) its **category**
+  (inline dropdown) and (2) a free-text **comment** (`transactions.comment`, §5). Nothing else in the
+  ledger is editable — amounts/dates/descriptions come from Plaid (or the manual-entry component) and
+  are fixed. Category + comment are also settable during Pending triage (below); the ledger edit is for
+  later correction.
+
+**The Pull → Pending → triage flow (transaction intake):**
+- A **"Pull" button** manually triggers the Plaid cursor sync (§6): it ingests everything new since the
+  last cursor. (Manual, not background — Zach presses it.)
+- Newly-pulled **settled** transactions land in a **"Pending" review table** = the user's triage inbox,
+  defined as `status='settled' AND category_id IS NULL` (not yet categorized). **This is NOT a Plaid
+  `pending` credit-card charge** — those are EXCLUDED from the budget until they settle (§4.4), so they
+  never appear in this inbox. The inbox is purely "settled, awaiting your categorization."
+- For each Pending row, the user assigns: **category**, an optional **comment**, and a **treatment**,
+  which is exactly one of the three §4.9 settlement paths the backend `FundService` already implements:
+  1. **Pay from savings accrual** — a **fund draw** from a sinking/surplus fund (prior-month savings).
+  2. **Spread over the next few months** — a **buffer-financed** purchase that creates a
+     `repayment_obligation` (D7): the full price is tracked now, the budget absorbs compulsory monthly
+     installments. (The per-transaction "borrow from myself.")
+  3. **Pay directly through the budget** — a normal in-month expense. **The default / most common case.**
+- Applying a treatment is one atomic triage action (category + comment + treatment together); once
+  triaged the row leaves the Pending inbox and appears in the month ledger on its transaction date.
+- **Filtering / sorting** in both surfaces: by date, account, category, settled/pending.
 - Likely client-rendered or SSR Dioxus (the portfolio site work will establish the Dioxus deploy
   pattern; reuse it here).
 - **Dogfood sequencing (DECIDED 2026-06-07):** do NOT gate chorale v0.2.0's release on this app. Ship
