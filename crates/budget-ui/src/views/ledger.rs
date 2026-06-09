@@ -51,6 +51,7 @@ use dioxus::prelude::*;
 use rust_decimal::prelude::ToPrimitive;
 
 use crate::Route;
+use crate::components::NavBar;
 use crate::services::{
     DayLedgerDto, EnvelopeCategoryDto, EnvelopeSummaryDto, InlineEditRequest, LedgerTransactionDto,
     MonthLedgerDto, ensure_month, get_envelope_summary, get_month_ledger, logout,
@@ -380,7 +381,7 @@ pub fn LedgerView() -> Element {
     });
 
     let page_nav = use_navigator();
-    let on_logout = move |_| {
+    let on_signout = move |()| {
         spawn(async move {
             let _ = logout().await;
             page_nav.push(Route::Login {});
@@ -393,72 +394,62 @@ pub fn LedgerView() -> Element {
     let label = month_label(year, month);
 
     rsx! {
-        main {
-            style: "font-family: sans-serif; padding: 1rem; max-width: 1080px; margin: 0 auto;",
+        div { class: "app-shell",
+            // Shared nav bar (RUST-DIOXUS-14 — NavBar is the canonical primitive)
+            NavBar { on_signout }
 
-            // -- Header --
-            div {
-                style: "display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;",
-                h1 { style: "margin: 0;", "Ledger" }
-                div {
-                    style: "display: flex; gap: 0.75rem; align-items: center;",
-                    Link { to: Route::PendingView {}, "Pending triage" }
-                    button { onclick: on_logout, style: "cursor: pointer;", "Sign out" }
-                }
-            }
+            main { class: "page-content",
+                h1 { class: "page-title", "Ledger" }
 
-            // -- Month navigation --
-            div {
-                style: "display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;",
-                button {
-                    style: "cursor: pointer; padding: 0.25rem 0.75rem;",
-                    onclick: move |_| { nav_year.set(py); nav_month.set(pm); },
-                    "< Prev"
+                // -- Month navigation --
+                div { class: "month-nav",
+                    button {
+                        class: "month-nav__btn",
+                        onclick: move |_| { nav_year.set(py); nav_month.set(pm); },
+                        "< Prev"
+                    }
+                    span { class: "month-nav__label", "{label}" }
+                    button {
+                        class: "month-nav__btn",
+                        onclick: move |_| { nav_year.set(ny); nav_month.set(nm); },
+                        "Next >"
+                    }
                 }
-                span {
-                    style: "font-size: 1.2rem; font-weight: 600; min-width: 160px; text-align: center;",
-                    "{label}"
-                }
-                button {
-                    style: "cursor: pointer; padding: 0.25rem 0.75rem;",
-                    onclick: move |_| { nav_year.set(ny); nav_month.set(nm); },
-                    "Next >"
-                }
-            }
 
-            // -- ensure_month error (silent on success) --
-            if let Some(Err(e)) = &*ensure.read() {
-                p { style: "color: #c00; font-size: 0.85rem;", role: "alert",
-                    "Warning: could not initialise month ({e})" }
-            }
-
-            // -- Envelope summary header (collapsible) --
-            {
-                match &*summary.read() {
-                    None => rsx! { p { style: "color: #555;", "Loading summary…" } },
-                    Some(Err(e)) => rsx! {
-                        p { style: "color: #c00;", role: "alert", "Error loading summary: {e}" }
-                    },
-                    Some(Ok(dto)) => rsx! {
-                        EnvelopeSummary { dto: dto.clone(), open: summary_open, on_toggle: move |()| {
-                            let cur = summary_open();
-                            summary_open.set(!cur);
-                        } }
-                    },
+                // -- ensure_month error (silent on success) --
+                if let Some(Err(e)) = &*ensure.read() {
+                    p { class: "text-error", role: "alert",
+                        "Warning: could not initialise month ({e})" }
                 }
-            }
 
-            // -- Daily ledger --
-            {
-                match &*ledger.read() {
-                    None => rsx! { p { style: "color: #555;", "Loading ledger…" } },
-                    Some(Err(e)) => rsx! {
-                        p { style: "color: #c00;", role: "alert", "Error loading ledger: {e}" }
-                        Link { to: Route::Login {}, "Return to login" }
-                    },
-                    Some(Ok(dto)) => rsx! {
-                        LedgerTable { dto: dto.clone(), summary: summary.read().clone() }
-                    },
+                // -- Envelope summary header (collapsible) --
+                {
+                    match &*summary.read() {
+                        None => rsx! { p { class: "loading-text", "Loading summary…" } },
+                        Some(Err(e)) => rsx! {
+                            p { class: "text-error", role: "alert", "Error loading summary: {e}" }
+                        },
+                        Some(Ok(dto)) => rsx! {
+                            EnvelopeSummary { dto: dto.clone(), open: summary_open, on_toggle: move |()| {
+                                let cur = summary_open();
+                                summary_open.set(!cur);
+                            } }
+                        },
+                    }
+                }
+
+                // -- Daily ledger --
+                {
+                    match &*ledger.read() {
+                        None => rsx! { p { class: "loading-text", "Loading ledger…" } },
+                        Some(Err(e)) => rsx! {
+                            p { class: "text-error", role: "alert", "Error loading ledger: {e}" }
+                            Link { to: Route::Login {}, "Return to login" }
+                        },
+                        Some(Ok(dto)) => rsx! {
+                            LedgerTable { dto: dto.clone(), summary: summary.read().clone() }
+                        },
+                    }
                 }
             }
         }
@@ -476,51 +467,51 @@ fn EnvelopeSummary(
     on_toggle: EventHandler<()>,
 ) -> Element {
     let is_open = open();
+    // The rolling-Other balance is itself a negative number when in deficit — make it
+    // visually distinct using the amount CSS classes.
+    let rolling_class = if dto.rolling_other.as_decimal().is_sign_negative()
+        && !dto.rolling_other.as_decimal().is_zero()
+    {
+        "envelope-rolling-value amount--negative"
+    } else {
+        "envelope-rolling-value"
+    };
     rsx! {
-        div {
-            style: "border: 1px solid #e2e8f0; border-radius: 6px; margin-bottom: 1.25rem; overflow: hidden;",
-
+        div { class: "envelope-header",
             // -- Collapse toggle bar + rolling Other --
             div {
-                style: "display: flex; align-items: center; justify-content: space-between; \
-                        background: #f0f4f8; padding: 0.5rem 1rem; cursor: pointer;",
+                class: "envelope-toggle",
                 onclick: move |_| on_toggle.call(()),
-                div {
-                    style: "display: flex; align-items: baseline; gap: 0.75rem;",
-                    span { style: "font-weight: 600;", "Envelope summary" }
-                    span { style: "font-size: 0.85rem; color: #555;",
-                        if is_open { "(click to collapse)" } else { "(click to expand)" } }
-                }
-                div {
-                    style: "display: flex; align-items: baseline; gap: 0.4rem;",
-                    span { style: "font-size: 0.85rem; color: #555;", "Rolling Other:" }
-                    span {
-                        style: "font-size: 1.15rem; font-weight: 700; font-variant-numeric: tabular-nums;",
-                        "{fmt_currency(dto.rolling_other)}"
+                div { class: "envelope-toggle__left",
+                    span { class: "envelope-toggle__title", "Envelope summary" }
+                    span { class: "envelope-toggle__hint",
+                        if is_open { "(click to collapse)" } else { "(click to expand)" }
                     }
+                }
+                div { class: "envelope-toggle__right",
+                    span { class: "envelope-rolling-label", "Rolling Other:" }
+                    span { class: "{rolling_class}", "{fmt_currency(dto.rolling_other)}" }
                 }
             }
 
             // -- Per-category rows --
             if is_open {
                 if !dto.month_exists {
-                    div {
-                        style: "padding: 0.75rem 1rem; background: #fff3cd;",
+                    div { class: "banner--warn",
                         "Month not yet initialised. Navigate to the current month to trigger set-up."
                     }
                 } else if dto.categories.is_empty() {
-                    div { style: "padding: 0.75rem 1rem; color: #555;",
-                        "No categories for this month." }
+                    div { style: "padding: 0.75rem 1rem;", class: "text-muted",
+                        "No categories for this month."
+                    }
                 } else {
-                    table {
-                        style: "width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums;",
+                    table { class: "envelope-table",
                         thead {
                             tr {
-                                style: "text-align: left; border-bottom: 1px solid #e2e8f0;",
-                                th { style: "padding: 0.4rem 1rem;", "Category" }
-                                th { style: "padding: 0.4rem 1rem; text-align: right;", "Budgeted" }
-                                th { style: "padding: 0.4rem 1rem; text-align: right;", "Spent" }
-                                th { style: "padding: 0.4rem 1rem; text-align: right;", "Remaining" }
+                                th { "Category" }
+                                th { "Budgeted" }
+                                th { "Spent" }
+                                th { "Remaining" }
                             }
                         }
                         tbody {
@@ -537,19 +528,25 @@ fn EnvelopeSummary(
 
 #[component]
 fn EnvelopeRow(cat: EnvelopeCategoryDto) -> Element {
-    // TODO(visual-polish): colour negative Remaining red, positive green.
-    let name_style = if cat.is_rollover {
-        "padding: 0.35rem 1rem; font-weight: 600;"
+    // Remaining < 0 = over-budget (red); > 0 = under-budget (green).
+    // TODO(visual-polish): add a filled progress bar within each row.
+    let remaining_class =
+        if cat.remaining.as_decimal().is_sign_negative() && !cat.remaining.as_decimal().is_zero() {
+            "amount amount--negative"
+        } else {
+            "amount amount--positive"
+        };
+    let row_class = if cat.is_rollover {
+        "envelope-row--rollover"
     } else {
-        "padding: 0.35rem 1rem;"
+        ""
     };
     rsx! {
-        tr {
-            style: "border-bottom: 1px solid #f1f5f9;",
-            td { style: "{name_style}", "{cat.name}" }
-            td { style: "padding: 0.35rem 1rem; text-align: right;", "{fmt_currency(cat.budgeted)}" }
-            td { style: "padding: 0.35rem 1rem; text-align: right;", "{fmt_currency(cat.spent)}" }
-            td { style: "padding: 0.35rem 1rem; text-align: right;", "{fmt_currency(cat.remaining)}" }
+        tr { class: "{row_class}",
+            td { "{cat.name}" }
+            td { class: "amount", "{fmt_currency(cat.budgeted)}" }
+            td { class: "amount", "{fmt_currency(cat.spent)}" }
+            td { class: "{remaining_class}", "{fmt_currency(cat.remaining)}" }
         }
     }
 }
@@ -596,31 +593,28 @@ fn LedgerTable(
 
     if dto.days.is_empty() {
         return rsx! {
-            p { style: "color: #555; margin-top: 0.5rem;",
+            p { class: "text-muted", style: "margin-top: 0.5rem;",
                 "No transactions yet for this month." }
         };
     }
 
     rsx! {
-        div {
-            style: "margin-top: 0.5rem;",
-            Table {
-                handle: table,
-                sort_enabled: true,
-                // Master/detail (cheat-sheet §1): Callback receiving the parent
-                // DayRow by value; mounts the child transaction table.
-                detail_renderer: Callback::new(move |day: DayRow| {
-                    let opts = opts_for_detail.clone();
-                    let name_to_id = name_to_id_for_detail.clone();
-                    rsx! {
-                        DayDetail {
-                            transactions: day.transactions.clone(),
-                            category_options: opts,
-                            name_to_id,
-                        }
+        Table {
+            handle: table,
+            sort_enabled: true,
+            // Master/detail (cheat-sheet §1): Callback receiving the parent
+            // DayRow by value; mounts the child transaction table.
+            detail_renderer: Callback::new(move |day: DayRow| {
+                let opts = opts_for_detail.clone();
+                let name_to_id = name_to_id_for_detail.clone();
+                rsx! {
+                    DayDetail {
+                        transactions: day.transactions.clone(),
+                        category_options: opts,
+                        name_to_id,
                     }
-                }),
-            }
+                }
+            }),
         }
     }
 }
@@ -704,8 +698,7 @@ fn DayDetail(
         });
 
     rsx! {
-        div {
-            style: "padding: 0.25rem 0 0.75rem 1.5rem;",
+        div { class: "day-detail",
             Table {
                 handle: table,
                 inline: true,

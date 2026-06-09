@@ -1,0 +1,446 @@
+/*
+ * app.css — Budget Tracker global stylesheet (FE3)
+ *
+ * Functional-but-minimal: consistent spacing, currency formatting conventions,
+ * negative-amount visibility, chorale group-header styling.
+ * TODO(visual-polish): design-system tokens (colour palette, corner-radii, type
+ * scale, focus rings, motion) — currently plain baseline values.
+ */
+
+/* ----- Reset / base ----- */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  color: #1a202c;
+  background: #ffffff;
+  line-height: 1.5;
+}
+
+/* ----- App shell ----- */
+.app-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ----- Nav bar ----- */
+.nav-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 1.25rem;
+  background: #1f2937;
+  color: #f9fafb;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.nav-bar__brand {
+  font-weight: 700;
+  font-size: 1rem;
+  color: #f9fafb;
+  text-decoration: none;
+  letter-spacing: 0.02em;
+}
+
+.nav-bar__links {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+/* Active nav link: highlighted with a lighter background */
+.nav-bar__link {
+  color: #d1d5db;
+  text-decoration: none;
+  padding: 0.3rem 0.7rem;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  transition: background 0.12s, color 0.12s;
+}
+
+.nav-bar__link:hover {
+  background: rgba(255,255,255,0.1);
+  color: #f9fafb;
+}
+
+/* "active" class is applied by Dioxus Link when the href matches the current
+   route (the router adds `aria-current="page"` and the `active` class). */
+.nav-bar__link.active,
+.nav-bar__link[aria-current="page"] {
+  background: rgba(255,255,255,0.15);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.nav-bar__signout {
+  margin-left: 0.5rem;
+  padding: 0.3rem 0.75rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  background: transparent;
+  color: #d1d5db;
+  border: 1px solid rgba(255,255,255,0.25);
+  border-radius: 4px;
+  transition: background 0.12s, color 0.12s;
+}
+
+.nav-bar__signout:hover {
+  background: rgba(255,255,255,0.1);
+  color: #f9fafb;
+}
+
+/* ----- Page layout ----- */
+.page-content {
+  flex: 1;
+  padding: 1.25rem 1.5rem;
+  max-width: 1100px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+/* ----- Typography ----- */
+.page-title {
+  margin: 0 0 1rem;
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #1a202c;
+}
+
+/* ----- Currency / amount display ----- */
+
+/*
+ * Amounts that are negative (expenses / deficits) are visually distinct.
+ * Applied inline via Rust when rendering amounts — class name is
+ * "amount amount--negative" for negative, "amount" for positive/zero.
+ */
+.amount {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.amount--negative {
+  color: #b91c1c; /* red-700: clear but not alarming */
+}
+
+.amount--positive {
+  color: #15803d; /* green-700 */
+}
+
+/* ----- Chorale table integration ----- */
+
+/*
+ * `.chorale-group-header` is applied by chorale to every group-header <tr>
+ * (cheat-sheet §2 / `group_header_class` default). Style it so the
+ * per-category subtotal row stands out from the transaction rows below it.
+ */
+.chorale-group-header {
+  background: #f0f4f8;
+  font-weight: 600;
+}
+
+.chorale-group-header td {
+  border-top: 1px solid #cbd5e0;
+  border-bottom: 1px solid #cbd5e0;
+  padding-top: 0.3rem;
+  padding-bottom: 0.3rem;
+}
+
+/* Chorale currency cells already render via RenderKind::Currency; supplement
+   with right-alignment for all cells that chorale aligns right (it applies
+   `text-align:right` inline but we mirror it in CSS for consistency). */
+.chorale-table td[data-align="right"],
+.chorale-table th[data-align="right"] {
+  text-align: right;
+}
+
+/* ----- Envelope summary header ----- */
+.envelope-header {
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  margin-bottom: 1.25rem;
+  overflow: hidden;
+}
+
+.envelope-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #f0f4f8;
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.envelope-toggle:hover {
+  background: #e8eef5;
+}
+
+.envelope-toggle__left {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.envelope-toggle__title {
+  font-weight: 600;
+}
+
+.envelope-toggle__hint {
+  font-size: 0.8rem;
+  color: #64748b;
+}
+
+.envelope-toggle__right {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.envelope-rolling-label {
+  font-size: 0.8rem;
+  color: #64748b;
+}
+
+.envelope-rolling-value {
+  font-size: 1.1rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.envelope-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.envelope-table th {
+  text-align: left;
+  padding: 0.4rem 1rem;
+  border-bottom: 1px solid #e2e8f0;
+  font-size: 0.8rem;
+  color: #64748b;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.envelope-table th:not(:first-child) {
+  text-align: right;
+}
+
+.envelope-table td {
+  padding: 0.35rem 1rem;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.envelope-table td:not(:first-child) {
+  text-align: right;
+}
+
+.envelope-row--rollover td:first-child {
+  font-weight: 600;
+}
+
+/* ----- Month navigation ----- */
+.month-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+}
+
+.month-nav__btn {
+  cursor: pointer;
+  padding: 0.25rem 0.75rem;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  transition: background 0.1s;
+}
+
+.month-nav__btn:hover {
+  background: #e2e8f0;
+}
+
+.month-nav__label {
+  font-size: 1.1rem;
+  font-weight: 600;
+  min-width: 160px;
+  text-align: center;
+}
+
+/* ----- Pending triage ----- */
+.pull-bar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.pull-btn {
+  cursor: pointer;
+  padding: 0.4rem 1.1rem;
+  font-weight: 600;
+  background: #1f2937;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  transition: background 0.12s;
+}
+
+.pull-btn:hover {
+  background: #374151;
+}
+
+.pull-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.pull-status {
+  font-size: 0.875rem;
+  color: #64748b;
+}
+
+.pull-status--ok {
+  color: #166534;
+}
+
+.pull-status--err {
+  color: #b91c1c;
+}
+
+.inbox {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.inbox-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+}
+
+.inbox-card__header {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  margin-bottom: 0.6rem;
+}
+
+.inbox-card__date {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: #1a202c;
+}
+
+.inbox-card__amount {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.inbox-card__desc {
+  color: #4b5563;
+}
+
+.inbox-card__fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+}
+
+.field-label {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #6b7280;
+  gap: 0.2rem;
+}
+
+.field-label select,
+.field-label input[type="text"],
+.field-label input[type="number"] {
+  padding: 0.3rem 0.45rem;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  background: #fff;
+}
+
+.field-label select:focus,
+.field-label input:focus {
+  outline: 2px solid #3b82f6;
+  outline-offset: 1px;
+}
+
+.triage-btn {
+  padding: 0.4rem 1rem;
+  cursor: pointer;
+  background: #166534;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  align-self: flex-end;
+  transition: background 0.12s;
+}
+
+.triage-btn:hover {
+  background: #15803d;
+}
+
+.triage-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.inline-error {
+  color: #b91c1c;
+  font-size: 0.8rem;
+  margin: 0.5rem 0 0;
+}
+
+/* ----- Utility ----- */
+.text-muted {
+  color: #64748b;
+}
+
+.text-error {
+  color: #b91c1c;
+}
+
+.text-success {
+  color: #166534;
+}
+
+.loading-text {
+  color: #64748b;
+  font-style: italic;
+}
+
+.banner--warn {
+  padding: 0.75rem 1rem;
+  background: #fef3c7;
+  border-left: 3px solid #f59e0b;
+  border-radius: 0 4px 4px 0;
+  font-size: 0.875rem;
+  color: #92400e;
+}
+
+/* Ledger sub-table indent */
+.day-detail {
+  padding: 0.25rem 0 0.75rem 1.5rem;
+}

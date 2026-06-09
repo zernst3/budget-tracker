@@ -104,6 +104,9 @@ pub fn App() -> Element {
         // Document head metadata for the PWA (manifest link, theme color, icons).
         // These render in the HTML <head> on SSR and are preserved on hydration.
         document::Link { rel: "manifest", href: "/manifest.json" }
+        // Global stylesheet (FE3): consistent spacing, nav, currency, group-header.
+        // Served by the Axum host as a compiled-in static route (/app.css).
+        document::Link { rel: "stylesheet", href: "/app.css" }
         document::Meta { name: "theme-color", content: "#1f2937" }
         document::Meta { name: "apple-mobile-web-app-capable", content: "yes" }
         document::Meta { name: "apple-mobile-web-app-status-bar-style", content: "default" }

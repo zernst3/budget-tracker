@@ -3,13 +3,19 @@
 //! implementation here; views compose them and never reimplement a primitive
 //! inline.
 //!
-//! Phase B0 ships no primitives yet (the scaffold views use raw elements). They
-//! land as the UI grows; this module is the single home for them so design-system
-//! decisions live in one place.
+//! ## Primitives
+//!
+//! - [`nav`] — the application [`NavBar`]: brand + authenticated route links +
+//!   sign-out button. Every authenticated page view composes this rather than
+//!   reimplementing a nav header inline (`RUST-DIOXUS-14`). Styled via
+//!   `/app.css` (FE3).
 //!
 //! [`webauthn`] is not a visual primitive but the client-side `WebAuthn` ceremony
 //! bridge (`navigator.credentials` via `document::eval`, `RUST-DIOXUS-15`): the
 //! reusable, view-agnostic glue the login + budget views call to run the passkey
 //! register / authenticate ceremonies in the browser.
 
+pub mod nav;
 pub mod webauthn;
+
+pub use nav::NavBar;

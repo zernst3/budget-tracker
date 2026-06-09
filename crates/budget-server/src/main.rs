@@ -216,6 +216,17 @@ async fn main() -> anyhow::Result<()> {
                     .into_response()
             }),
         )
+        // Global stylesheet (FE3: consistent spacing, nav, currency, group-header)
+        .route(
+            "/app.css",
+            get(|| async {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
+                    include_str!("../static/app.css"),
+                )
+                    .into_response()
+            }),
+        )
         // Dioxus fullstack app: SSR HTML + client bundle + server functions
         .serve_dioxus_application(config, budget_ui::App)
         // Layer order: session layer first (populates `Session` extension),

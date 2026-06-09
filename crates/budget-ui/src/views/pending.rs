@@ -63,6 +63,7 @@ use std::collections::HashMap;
 use dioxus::prelude::*;
 
 use crate::Route;
+use crate::components::NavBar;
 use crate::services::{
     EnvelopeCategoryDto, FundDto, PendingRowDto, TreatmentDto, TriageRequestDto,
     get_envelope_summary, get_pending_inbox, list_funds, logout, pull, triage_transaction,
@@ -193,7 +194,7 @@ pub fn PendingView() -> Element {
     });
 
     let page_nav = use_navigator();
-    let on_logout = move |_| {
+    let on_signout = move |()| {
         spawn(async move {
             let _ = logout().await;
             page_nav.push(Route::Login {});
@@ -231,71 +232,63 @@ pub fn PendingView() -> Element {
     };
 
     rsx! {
-        main {
-            style: "font-family: sans-serif; padding: 1rem; max-width: 900px; margin: 0 auto;",
+        div { class: "app-shell",
+            // Shared nav bar (RUST-DIOXUS-14 — NavBar is the canonical primitive)
+            NavBar { on_signout }
 
-            // -- Header + nav --
-            div {
-                style: "display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;",
-                h1 { style: "margin: 0;", "Pending triage" }
-                div {
-                    style: "display: flex; gap: 0.75rem; align-items: center;",
-                    Link { to: Route::LedgerView {}, "Back to ledger" }
-                    button { onclick: on_logout, style: "cursor: pointer;", "Sign out" }
-                }
-            }
+            main { class: "page-content",
+                h1 { class: "page-title", "Pending triage" }
 
-            // -- Pull button + status --
-            div {
-                style: "display: flex; align-items: center; gap: 1rem; margin-bottom: 1.25rem;",
-                button {
-                    style: "cursor: pointer; padding: 0.4rem 1.1rem; font-weight: 600; \
-                            background: #1f2937; color: #fff; border: none; border-radius: 6px;",
-                    onclick: on_pull,
-                    "Pull from bank"
-                }
-                {
-                    match &*pull_status.read() {
-                        None => rsx! {
-                            span { style: "color: #555; font-size: 0.9rem;",
-                                "Pull ingests new settled transactions into the inbox." }
-                        },
-                        Some(Ok(msg)) => rsx! {
-                            span { style: "color: #166534; font-size: 0.9rem;", role: "status", "{msg}" }
-                        },
-                        Some(Err(msg)) => rsx! {
-                            span { style: "color: #c00; font-size: 0.9rem;", role: "alert", "{msg}" }
-                        },
+                // -- Pull button + status --
+                div { class: "pull-bar",
+                    button {
+                        class: "pull-btn",
+                        onclick: on_pull,
+                        "Pull from bank"
+                    }
+                    {
+                        match &*pull_status.read() {
+                            None => rsx! {
+                                span { class: "pull-status",
+                                    "Pull ingests new settled transactions into the inbox." }
+                            },
+                            Some(Ok(msg)) => rsx! {
+                                span { class: "pull-status pull-status--ok", role: "status", "{msg}" }
+                            },
+                            Some(Err(msg)) => rsx! {
+                                span { class: "pull-status pull-status--err", role: "alert", "{msg}" }
+                            },
+                        }
                     }
                 }
-            }
 
-            // -- The inbox --
-            {
-                match &*inbox.read() {
-                    None => rsx! { p { style: "color: #555;", "Loading inbox…" } },
-                    Some(Err(e)) => rsx! {
-                        p { style: "color: #c00;", role: "alert", "Error loading inbox: {e}" }
-                        Link { to: Route::Login {}, "Return to login" }
-                    },
-                    Some(Ok(rows)) if rows.is_empty() => rsx! {
-                        p { style: "color: #555;", "Nothing to triage. Pull to ingest new transactions." }
-                    },
-                    Some(Ok(rows)) => rsx! {
-                        div {
-                            style: "display: flex; flex-direction: column; gap: 0.75rem;",
-                            for row in rows.iter() {
-                                PendingRowCard {
-                                    key: "{row.id}",
-                                    row: row.clone(),
-                                    categories: category_opts.clone(),
-                                    funds: fund_opts.clone(),
-                                    drafts,
-                                    refresh,
+                // -- The inbox --
+                {
+                    match &*inbox.read() {
+                        None => rsx! { p { class: "loading-text", "Loading inbox…" } },
+                        Some(Err(e)) => rsx! {
+                            p { class: "text-error", role: "alert", "Error loading inbox: {e}" }
+                            Link { to: Route::Login {}, "Return to login" }
+                        },
+                        Some(Ok(rows)) if rows.is_empty() => rsx! {
+                            p { class: "text-muted",
+                                "Nothing to triage. Pull to ingest new transactions." }
+                        },
+                        Some(Ok(rows)) => rsx! {
+                            div { class: "inbox",
+                                for row in rows.iter() {
+                                    PendingRowCard {
+                                        key: "{row.id}",
+                                        row: row.clone(),
+                                        categories: category_opts.clone(),
+                                        funds: fund_opts.clone(),
+                                        drafts,
+                                        refresh,
+                                    }
                                 }
                             }
-                        }
-                    },
+                        },
+                    }
                 }
             }
         }
@@ -400,31 +393,31 @@ fn PendingRowCard(
         });
     };
 
-    rsx! {
-        div {
-            style: "border: 1px solid #e2e8f0; border-radius: 8px; padding: 0.85rem 1rem;",
+    // The amount on a pending row is an expense (negative). Apply the negative-amount
+    // class so it is visually distinct (red).
+    let amount_class = if row.amount.is_negative() {
+        "inbox-card__amount amount--negative"
+    } else {
+        "inbox-card__amount"
+    };
 
+    rsx! {
+        div { class: "inbox-card",
             // -- Read-only header: date / amount / description --
-            div {
-                style: "display: flex; align-items: baseline; gap: 1rem; margin-bottom: 0.6rem;",
-                span { style: "font-weight: 600; font-variant-numeric: tabular-nums;", "{row.date}" }
-                span {
-                    style: "font-weight: 700; font-variant-numeric: tabular-nums;",
-                    "{fmt_currency(row.amount)}"
-                }
-                span { style: "color: #444;", "{row.description}" }
+            div { class: "inbox-card__header",
+                span { class: "inbox-card__date", "{row.date}" }
+                span { class: "{amount_class}", "{fmt_currency(row.amount)}" }
+                span { class: "inbox-card__desc", "{row.description}" }
             }
 
             // -- Editable controls --
-            div {
-                style: "display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-end;",
+            div { class: "inbox-card__fields",
 
                 // Category (required).
-                label {
-                    style: "display: flex; flex-direction: column; font-size: 0.8rem; color: #555;",
+                label { class: "field-label",
                     "Category"
                     select {
-                        style: "padding: 0.3rem; min-width: 150px;",
+                        style: "min-width: 150px;",
                         value: "{draft.category_id}",
                         onchange: on_category,
                         option { value: "", "— choose —" }
@@ -435,11 +428,10 @@ fn PendingRowCard(
                 }
 
                 // Comment (optional).
-                label {
-                    style: "display: flex; flex-direction: column; font-size: 0.8rem; color: #555;",
+                label { class: "field-label",
                     "Comment"
                     input {
-                        style: "padding: 0.3rem; min-width: 180px;",
+                        style: "min-width: 180px;",
                         r#type: "text",
                         value: "{draft.comment}",
                         oninput: on_comment,
@@ -448,11 +440,10 @@ fn PendingRowCard(
                 }
 
                 // Treatment.
-                label {
-                    style: "display: flex; flex-direction: column; font-size: 0.8rem; color: #555;",
+                label { class: "field-label",
                     "Treatment"
                     select {
-                        style: "padding: 0.3rem; min-width: 170px;",
+                        style: "min-width: 170px;",
                         value: "{treatment.as_value()}",
                         onchange: on_treatment,
                         option { value: "direct", "Pay directly (default)" }
@@ -463,11 +454,10 @@ fn PendingRowCard(
 
                 // Treatment-specific sub-fields.
                 if treatment == TreatmentChoice::PayFromSavings {
-                    label {
-                        style: "display: flex; flex-direction: column; font-size: 0.8rem; color: #555;",
+                    label { class: "field-label",
                         "Fund"
                         select {
-                            style: "padding: 0.3rem; min-width: 170px;",
+                            style: "min-width: 170px;",
                             value: "{draft.fund_id}",
                             onchange: on_fund.clone(),
                             option { value: "", "— choose fund —" }
@@ -479,11 +469,10 @@ fn PendingRowCard(
                     }
                 }
                 if treatment == TreatmentChoice::SpreadOverMonths {
-                    label {
-                        style: "display: flex; flex-direction: column; font-size: 0.8rem; color: #555;",
+                    label { class: "field-label",
                         "Buffer fund"
                         select {
-                            style: "padding: 0.3rem; min-width: 170px;",
+                            style: "min-width: 170px;",
                             value: "{draft.fund_id}",
                             onchange: on_fund,
                             option { value: "", "— choose buffer —" }
@@ -495,11 +484,10 @@ fn PendingRowCard(
                             }
                         }
                     }
-                    label {
-                        style: "display: flex; flex-direction: column; font-size: 0.8rem; color: #555;",
+                    label { class: "field-label",
                         "Months"
                         input {
-                            style: "padding: 0.3rem; width: 80px;",
+                            style: "width: 80px;",
                             r#type: "number",
                             min: "1",
                             value: "{draft.months}",
@@ -511,8 +499,7 @@ fn PendingRowCard(
 
                 // Submit.
                 button {
-                    style: "padding: 0.4rem 1rem; cursor: pointer; align-self: flex-end; \
-                            background: #166534; color: #fff; border: none; border-radius: 6px;",
+                    class: "triage-btn",
                     disabled: draft.submitting,
                     onclick: on_submit,
                     if draft.submitting { "Triaging…" } else { "Triage" }
@@ -521,8 +508,7 @@ fn PendingRowCard(
 
             // -- Inline error --
             if let Some(err) = &draft.error {
-                p { style: "color: #c00; font-size: 0.85rem; margin: 0.5rem 0 0;", role: "alert",
-                    "{err}" }
+                p { class: "inline-error", role: "alert", "{err}" }
             }
         }
     }
