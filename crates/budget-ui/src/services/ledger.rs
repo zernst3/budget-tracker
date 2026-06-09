@@ -239,7 +239,17 @@ pub async fn get_month_ledger(
         .await
         .map_err(|e| internal_error(&e))?;
 
-    let (days, month_total) = build_days(&txns, &name_by_id);
+    // The buffer-financed full-price tracking rows (SPEC §4.9 D7): post for
+    // TRACKING only and must NOT inflate the day/month expense totals (the budget
+    // effect is the installments). Same exclusion set the close-path netting uses,
+    // so the ledger totals match `counts_in_month_expense_remaining`.
+    let buffer_financed = state
+        .funds
+        .list_buffer_financed_transaction_ids(user.id())
+        .await
+        .map_err(|e| internal_error(&e))?;
+
+    let (days, month_total) = build_days(&txns, &name_by_id, &buffer_financed);
 
     Ok(MonthLedgerDto {
         year,
@@ -255,32 +265,54 @@ pub async fn get_month_ledger(
 ///
 /// Extracted from the server function so the day-total invariant is unit-tested
 /// directly (no DB / session plumbing). Days are returned ascending by date
-/// (`BTreeMap` ordering). A day's `total_expense` sums ONLY budget-counting
-/// (`BUDGET-STATUS-DRIVES-INCLUSION-1`), non-income, non-rollover transactions
-/// that are not matched placeholders (`BUDGET-SETTLE-ON-MATCH-1`); the returned
-/// `month_total_expense` is the sum of those per-day totals, so
-/// `Σ days[].total_expense == month_total` holds by construction.
+/// (`BTreeMap` ordering). A day's `total_expense` sums ONLY the transactions that
+/// pass [`budget_domain::counts_in_month_expense_remaining`] — the SAME predicate
+/// the month-close netting uses (`BUDGET-STATUS-DRIVES-INCLUSION-1`,
+/// `BUDGET-NO-DOUBLE-CHARGE-1`, `BUDGET-FUND-EARMARK-1`): budget-counting by
+/// status, not income, not a matched placeholder (`BUDGET-SETTLE-ON-MATCH-1`),
+/// **not a fund draw** (`is_fund_draw`, already expensed at contribution time), and
+/// **not a buffer-financed full-price tracking row** (`buffer_financed_txn_ids`,
+/// SPEC §4.9 D7 — the budget effect is the installments). The rollover row is
+/// excluded because `counts_in_month_expense_remaining` treats it as income-side
+/// netting carryover, not a day expense. The returned `month_total_expense` is the
+/// sum of those per-day totals, so `Σ days[].total_expense == month_total` holds by
+/// construction.
 #[cfg(feature = "server")]
 fn build_days(
     txns: &[budget_domain::Transaction],
     name_by_id: &std::collections::HashMap<budget_domain::CategoryId, String>,
+    buffer_financed_txn_ids: &[budget_domain::ids::TransactionId],
 ) -> (Vec<DayLedgerDto>, Money) {
     use std::collections::BTreeMap;
 
     use budget_domain::TransactionStatus;
+    use budget_domain::counts_in_month_expense_remaining;
 
     let mut by_day: BTreeMap<chrono::NaiveDate, Vec<LedgerTransactionDto>> = BTreeMap::new();
     let mut day_total: BTreeMap<chrono::NaiveDate, Money> = BTreeMap::new();
 
     for t in txns {
         let is_income = t.is_income();
-        // Counts toward the day's EXPENSE total iff: status counts, it is not a
-        // matched placeholder (the real txn counts instead,
-        // BUDGET-SETTLE-ON-MATCH-1), and it is neither income nor the rollover row.
-        let counts = t.counts_in_budget() && !t.is_matched_placeholder();
-        if counts && !is_income && !t.is_rollover {
+        // Counts toward the day's EXPENSE total iff the shared close-path predicate
+        // includes it: status counts, not a matched placeholder
+        // (BUDGET-SETTLE-ON-MATCH-1), not income, not a fund draw
+        // (BUDGET-NO-DOUBLE-CHARGE-1: the money was already expensed at contribution
+        // time), and not a buffer-financed full-price tracking row (SPEC §4.9 D7:
+        // the installments are the budget effect, not the full price). `&[]` for the
+        // fund-category arg: D6 Model A no longer drives a contribution exclusion off
+        // it (it is unused by the predicate). Reusing the predicate keeps the ledger
+        // totals from drifting away from the month-close net.
+        let counts =
+            counts_in_month_expense_remaining(t, &[], buffer_financed_txn_ids) && !t.is_rollover;
+        if counts {
             *day_total.entry(t.date).or_insert(Money::ZERO) += t.amount;
         }
+
+        // The per-row display flag (BUDGET-STATUS-DRIVES-INCLUSION-1): status-counting
+        // and not a matched placeholder. This is a row-level "does this line item
+        // count by status" badge, distinct from the day-total inclusion above (which
+        // additionally drops income / rollover / fund-draw / buffer-financed rows).
+        let row_counts_in_budget = t.counts_in_budget() && !t.is_matched_placeholder();
 
         let status = match t.status {
             TransactionStatus::Settled => "settled",
@@ -303,7 +335,7 @@ fn build_days(
                 status: status.to_owned(),
                 is_rollover: t.is_rollover,
                 is_income,
-                counts_in_budget: counts,
+                counts_in_budget: row_counts_in_budget,
             });
     }
 
@@ -576,7 +608,7 @@ mod tests {
         ];
         let names: HashMap<CategoryId, String> = HashMap::new();
 
-        let (days, month_total) = build_days(&txns, &names);
+        let (days, month_total) = build_days(&txns, &names, &[]);
 
         // Days are ascending and one per active day.
         assert_eq!(days.len(), 3);
@@ -608,7 +640,7 @@ mod tests {
 
         let txns = vec![pending, income, rollover, real];
         let names: HashMap<CategoryId, String> = HashMap::new();
-        let (days, month_total) = build_days(&txns, &names);
+        let (days, month_total) = build_days(&txns, &names, &[]);
 
         // The only expense counted is the real -$12.34, on July 5.
         assert_eq!(month_total, Money::from_minor(-1_234));
@@ -651,12 +683,66 @@ mod tests {
 
         let txns = vec![real, placeholder];
         let names: HashMap<CategoryId, String> = HashMap::new();
-        let (_days, month_total) = build_days(&txns, &names);
+        let (_days, month_total) = build_days(&txns, &names, &[]);
 
         // Counts once (-$80), NOT twice (-$160 would be the double-count bug).
         assert_eq!(month_total, Money::from_minor(-8_000));
         assert_ne!(month_total, Money::from_minor(-16_000));
         assert_eq!(month_total.as_decimal(), oracle_month_expense(&txns));
+    }
+
+    #[test]
+    fn fund_draw_and_buffer_financed_rows_are_excluded_from_day_totals() {
+        // BUDGET-NO-DOUBLE-CHARGE-1 / SPEC §4.9 D7: after triage, a PayFromSavings
+        // row carries is_fund_draw=true (money already expensed at contribution
+        // time) and a SpreadOverMonths full-price tracking row is referenced by a
+        // repayment obligation. NEITHER may inflate the day/month expense total —
+        // only the ordinary expense counts. This mirrors the month-close net so the
+        // ledger and the rollover math agree.
+        let cat = CategoryId::generate();
+
+        // An ordinary in-month expense (PayDirectly) — counts: -$30.
+        let direct = txn(day(2026, 7, 8), Some(cat), Money::from_minor(-3_000));
+
+        // A fund-draw (PayFromSavings) — categorized + settled but is_fund_draw — must
+        // NOT count.
+        let mut fund_draw = txn(day(2026, 7, 8), Some(cat), Money::from_minor(-5_000));
+        fund_draw.is_fund_draw = true;
+
+        // A buffer-financed full-price tracking row (SpreadOverMonths) — uncategorized,
+        // is_fund_draw=false, but referenced by an obligation — must NOT count.
+        let buffer_financed = txn(day(2026, 7, 8), None, Money::from_minor(-200_000));
+        let buffer_ids = vec![buffer_financed.id];
+
+        let txns = vec![direct, fund_draw, buffer_financed];
+        let names: HashMap<CategoryId, String> = HashMap::new();
+        let (days, month_total) = build_days(&txns, &names, &buffer_ids);
+
+        // Only the -$30 ordinary expense counts; the draw (-$50) and the
+        // full-price (-$2000) are excluded.
+        assert_eq!(month_total, Money::from_minor(-3_000));
+        // Independent fold over the SAME D6/D7 rules, different code path.
+        let oracle: Decimal = txns
+            .iter()
+            .filter(|t| {
+                t.counts_in_budget()
+                    && !t.is_matched_placeholder()
+                    && !t.is_income()
+                    && !t.is_rollover
+                    && !t.is_fund_draw
+                    && !buffer_ids.contains(&t.id)
+            })
+            .map(|t| t.amount.as_decimal())
+            .sum();
+        assert_eq!(month_total.as_decimal(), oracle);
+
+        // The naive double-count bug (summing everything) would be -$2080 — assert
+        // we are NOT that.
+        assert_ne!(month_total, Money::from_minor(-208_000));
+
+        // All three rows are still surfaced in the child table (read-only display).
+        let total_rows: usize = days.iter().map(|d| d.transactions.len()).sum();
+        assert_eq!(total_rows, 3, "every row surfaced, none hidden");
     }
 
     #[test]
@@ -667,7 +753,7 @@ mod tests {
 
         let categorized = txn(day(2026, 7, 2), Some(cat), Money::from_minor(-2_000));
         let uncategorized = txn(day(2026, 7, 2), None, Money::from_minor(-1_000));
-        let (days, _) = build_days(&[categorized, uncategorized], &names);
+        let (days, _) = build_days(&[categorized, uncategorized], &names, &[]);
 
         let rows = &days[0].transactions;
         let g = rows

@@ -213,12 +213,20 @@ impl TransactionRepository for PostgresTransactionRepository {
         // (BUDGET-SETTLE-ON-MATCH-1): the real txn it links to counts instead, so
         // the pair counts exactly once (BUDGET-NO-DOUBLE-CHARGE-1). Only 'expected'
         // rows ever carry the link, so this never excludes a settled row.
+        // is_fund_draw = false excludes a fund DRAW (surplus draw, sinking payout,
+        // a PayFromSavings triage) from category spent (BUDGET-NO-DOUBLE-CHARGE-1 /
+        // BUDGET-FUND-EARMARK-1): the money was already expensed at contribution
+        // time, so the categorized draw row must NOT re-charge its category. This
+        // matches the close-path predicate counts_in_month_expense_remaining. The
+        // buffer-financed full-price tracking row is uncategorized (category_id IS
+        // NULL) and is therefore already excluded here by construction.
         let sql = "SELECT category_id, SUM(amount) AS spent \
                    FROM transactions \
                    WHERE month_id = $1 \
                      AND category_id IS NOT NULL \
                      AND status IN ('settled', 'expected') \
                      AND matched_transaction_id IS NULL \
+                     AND is_fund_draw = false \
                    GROUP BY category_id";
         let stmt = Statement::from_sql_and_values(
             DatabaseBackend::Postgres,

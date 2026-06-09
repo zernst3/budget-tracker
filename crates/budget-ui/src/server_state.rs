@@ -156,6 +156,10 @@ pub struct MonthViewState {
     pub budgets: Arc<dyn BudgetRepository>,
     /// Transaction repository — `category_spent_for_month` single-query aggregation.
     pub transactions: Arc<dyn TransactionRepository>,
+    /// Fund repository — `list_buffer_financed_transaction_ids` (`SPEC §4.9` D7):
+    /// the full-price tracking rows the ledger day-totals must exclude so they match
+    /// the month-close net (`BUDGET-NO-DOUBLE-CHARGE-1`).
+    pub funds: Arc<dyn budget_domain::repositories::FundRepository>,
     /// Month lifecycle — `ensure_current_month` (lazy-init, idempotent).
     pub lifecycle: Arc<budget_app_services::MonthLifecycleService>,
 }
@@ -179,12 +183,14 @@ impl MonthViewState {
         months: Arc<dyn MonthRepository>,
         budgets: Arc<dyn BudgetRepository>,
         transactions: Arc<dyn TransactionRepository>,
+        funds: Arc<dyn budget_domain::repositories::FundRepository>,
         lifecycle: Arc<budget_app_services::MonthLifecycleService>,
     ) -> Self {
         Self {
             months,
             budgets,
             transactions,
+            funds,
             lifecycle,
         }
     }
@@ -214,7 +220,7 @@ impl MonthViewState {
             Arc::new(PostgresTransactionRepository::new(transactions_db));
         let funds: Arc<dyn FundRepository> = Arc::new(PostgresFundRepository::new(funds_db));
 
-        // Zero-expectation income seam for B4 (read-only view, see doc above).
+        // Zero-expectation income seam for B4/ledger (read-only view, see doc above).
         let income: Arc<dyn IncomeExpectation> = Arc::new(SemimonthlyFixedExpectation::new(
             budget_domain::money::Money::ZERO,
         ));
@@ -225,7 +231,7 @@ impl MonthViewState {
             months.clone(),
             budgets.clone(),
             transactions.clone(),
-            funds,
+            funds.clone(),
             uow,
             income,
         ));
@@ -234,6 +240,7 @@ impl MonthViewState {
             months,
             budgets,
             transactions,
+            funds,
             lifecycle,
         }
     }
