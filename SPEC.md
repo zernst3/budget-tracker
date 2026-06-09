@@ -353,7 +353,7 @@ Computed (query/materialize, not stored):
 - category actual-spent (per month) = `settled ? sum(settled txns in category) : placeholder`
 - category remaining = `budget_amount - actual_spent`
 - month net leftover = `(actual income − expected income) + sum(remaining across categories)` → becomes next month's rollover txn (income variance nets into Other by formula, not a discrete line item; D5 = B, §12)
-- fund contributions (sinking accrual / surplus / buffer repayment) are an **expense against the month** and are **excluded** from the net-leftover above, so an earmarked dollar is counted once (D6 / `BUDGET-FUND-EARMARK-1`, §12)
+- fund contributions (sinking accrual / surplus / buffer repayment) are a **manual expense booked to the rollover ("Other") bucket**: they **count** in budget math and **reduce** the net-leftover above (and thus the rolling Other) by the contribution, while the fund balance rises by the same amount. The earmarked dollar is counted once, via that Other expense; fund balances are NOT separately subtracted from free-to-spend (D6 / `BUDGET-FUND-EARMARK-1`, §12)
 
 **Multi-user-shaped, single-user-built:** every core table has `user_id` (free future-proofing) but
 DO NOT build any multi-user features (see §9).
@@ -525,10 +525,17 @@ in `CONVENTIONS.md` (the Camerata-emitted ruleset).
   Counted **once**: surplus-routing + the smoothing buffer are smoothed-mode-only, and Zach is
   per-paycheck (no competing buffer). The wellness-reimbursement "add to this month" checkbox is a
   smoothed-mode override only; in per-paycheck mode the surplus auto-raises Other with no checkbox.
-- **D6 — Fund contributions are month expenses (`BUDGET-FUND-EARMARK-1`): CONFIRMED.** Money into any
-  fund (sinking accrual, surplus contribution, buffer repayment) is an expense against that month,
-  reduces free-to-spend, and is **excluded** from the rollover net, so an earmarked dollar is counted
-  once. Fund **draws** are fund-draws, not re-charged expenses (`BUDGET-NO-DOUBLE-CHARGE-1`).
+- **D6 — Fund contributions are a manual "Other"-bucket expense (`BUDGET-FUND-EARMARK-1`): RESOLVED
+  2026-06-08 (Model A).** Money into any fund (sinking accrual, surplus contribution, buffer repayment)
+  is recorded as a **manual expense transaction booked to the rollover ("Other") bucket**. It **counts**
+  in budget math and **reduces** the month net-leftover (and therefore the rolling Other that carries
+  forward) by the contribution amount, while the fund balance increases by the same amount. The earmark
+  bites exactly once, **through that Other expense** — free-to-spend is the rolling Other, and fund
+  balances are **NOT** separately subtracted from it (that would double-count). Fund **draws** (sinking
+  payout, surplus draw, buffer-financed cash) are fund-draws, **not** re-charged budget expenses
+  (`BUDGET-NO-DOUBLE-CHARGE-1`), since the money was already expensed when it was contributed. *(This
+  overrides the build's initial total-exclusion model: a $50 contribution makes the rolling Other −$50,
+  not $0.)*
 - **D7 — Buffer-financed purchase: full price tracked, ZERO month-budget impact.** The full-price
   transaction posts for tracking but does not hit the month's budget; it is offset by the buffer draw
   (a fund-draw fronting the cash). The `repayment_obligation`'s monthly installments **are** the
