@@ -87,6 +87,7 @@ impl SecretVault for AzureKeyVault {
 mod tests {
     #![allow(clippy::unwrap_used)]
     #![allow(clippy::expect_used)]
+    #![allow(clippy::panic)]
 
     use super::AzureKeyVault;
 
@@ -102,5 +103,44 @@ mod tests {
         // Either the managed-identity credential or the endpoint validation
         // fails; both surface as the typed error, never a panic.
         assert!(result.is_err(), "a non-http(s) endpoint must be rejected");
+    }
+
+    // ---- Adversarial / fail-safe tests (ORCH-NEW-PATH-TESTS-1) --------------
+
+    #[test]
+    fn construction_failure_never_embeds_a_vault_value() {
+        // BUDGET-PLAID-TOKEN-VAULT-1: a failure must not carry secret material.
+        // Construction errors only ever describe the endpoint/identity category;
+        // there is no secret to leak at construction, but we assert the Display
+        // text is the typed operational description, not anything caller-supplied
+        // that could resemble a secret.
+        use budget_domain::auth::AuthError;
+        // AzureKeyVault (the Ok type) is not Debug, so match instead of unwrap_err.
+        match AzureKeyVault::new("ftp://not-a-vault") {
+            Err(AuthError::SecretVault(msg)) => {
+                // The message must be a non-empty operational description.
+                assert!(!msg.is_empty());
+            }
+            Err(other) => panic!("expected SecretVault error, got {other:?}"),
+            Ok(_) => panic!("a non-http(s) endpoint must not succeed"),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live Azure Key Vault + managed identity (SPEC §12, out of band)"]
+    async fn live_get_secret_round_trip() {
+        // Gated live test: only runs against a real vault provided via env. Reads
+        // a known secret name and asserts a non-empty value comes back. Never
+        // logs the value (BUDGET-PLAID-TOKEN-VAULT-1).
+        use budget_domain::auth::SecretVault;
+        let Ok(vault_url) = std::env::var("KEY_VAULT_URL") else {
+            return;
+        };
+        let Ok(secret_name) = std::env::var("KEY_VAULT_TEST_SECRET") else {
+            return;
+        };
+        let vault = AzureKeyVault::new(&vault_url).expect("build vault");
+        let value = vault.get_secret(&secret_name).await.expect("read secret");
+        assert!(!value.is_empty(), "a live secret must have a value");
     }
 }

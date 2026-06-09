@@ -117,3 +117,4 @@ sea-orm = { workspace = true, features = ["mock"] }
 tower = { version = "0.5", features = ["util"] }
 tower-sessions = { version = "0.14", features = ["memory-store"] }
 async-trait = { workspace = true }
+webauthn-authenticator-rs = { version = "0.5.5", default-features = false, features = ["softpasskey", "crypto"] }

@@ -66,6 +66,7 @@ impl PasswordHasher for Argon2idHasher {
 mod tests {
     #![allow(clippy::unwrap_used)]
     #![allow(clippy::expect_used)]
+    #![allow(clippy::panic)]
 
     use super::Argon2idHasher;
     use budget_domain::auth::{AuthError, PasswordHasher};
@@ -114,5 +115,111 @@ mod tests {
         let h = Argon2idHasher::new();
         let err = h.verify("whatever", "not-a-phc-string").unwrap_err();
         assert!(matches!(err, AuthError::PasswordHashing(_)));
+    }
+
+    // ---- Adversarial / independent security tests (ORCH-NEW-PATH-TESTS-1) ----
+
+    #[test]
+    fn empty_password_hashes_and_only_empty_verifies() {
+        // An empty password is still a value the engine handles deterministically:
+        // it hashes, the hash is not the plaintext, and only the empty string
+        // verifies against it (a non-empty guess must be Ok(false), not an error).
+        let h = Argon2idHasher::new();
+        let hash = h.hash("").expect("hash empty");
+        assert!(hash.starts_with("$argon2id$"));
+        assert_eq!(h.verify("", &hash), Ok(true), "empty must verify");
+        assert_eq!(h.verify("x", &hash), Ok(false), "non-empty must not verify");
+    }
+
+    #[test]
+    fn empty_guess_against_real_password_is_false() {
+        // The inverse: an empty guess must NOT authenticate a real password.
+        let h = Argon2idHasher::new();
+        let hash = h.hash("a-real-password").expect("hash");
+        assert_eq!(h.verify("", &hash), Ok(false));
+    }
+
+    #[test]
+    fn hash_never_contains_plaintext() {
+        // The PHC string carries only algorithm params + salt + derived hash;
+        // the plaintext must never appear, even as a substring, for several inputs.
+        let h = Argon2idHasher::new();
+        for plaintext in ["hunter2", "P@ssw0rd!longer-secret-value", "café-ünïçødé"] {
+            let hash = h.hash(plaintext).expect("hash");
+            assert!(
+                !hash.contains(plaintext),
+                "plaintext {plaintext:?} leaked into the stored hash",
+            );
+        }
+    }
+
+    #[test]
+    fn argon2_parameters_are_non_trivial() {
+        // The default Argon2id cost must be memory-hard, not a degenerate config.
+        // Parse the PHC string and assert m (memory KiB), t (iterations), and p
+        // (parallelism) meet a meaningful floor. OWASP's minimum for Argon2id is
+        // m>=19456 (19 MiB), t>=2, p>=1; the argon2 crate default meets this.
+        let h = Argon2idHasher::new();
+        let hash = h.hash("params-check").expect("hash");
+        let parsed = argon2::password_hash::PasswordHash::new(&hash).expect("parse phc");
+        let params = argon2::Params::try_from(&parsed).expect("params");
+        assert!(
+            params.m_cost() >= 19_456,
+            "memory cost too low: {} KiB (want >= 19456)",
+            params.m_cost(),
+        );
+        assert!(
+            params.t_cost() >= 2,
+            "iteration count too low: {}",
+            params.t_cost(),
+        );
+        assert!(params.p_cost() >= 1, "parallelism must be >= 1");
+        // The algorithm + version must be Argon2id v19 (not argon2i / argon2d).
+        assert_eq!(parsed.algorithm.as_str(), "argon2id");
+        assert_eq!(parsed.version, Some(0x13), "must be Argon2 v19 (0x13)");
+    }
+
+    #[test]
+    fn verifying_a_hash_made_for_a_different_password_is_false_not_error() {
+        // Two distinct passwords; the hash of one must not verify the other, and
+        // the mismatch is a clean Ok(false) (not leaked as an engine error).
+        let h = Argon2idHasher::new();
+        let hash_a = h.hash("alpha").expect("hash a");
+        assert_eq!(h.verify("bravo", &hash_a), Ok(false));
+        // Case sensitivity: a case variant must not verify.
+        assert_eq!(h.verify("Alpha", &hash_a), Ok(false));
+        // Trailing whitespace must not verify (no silent trimming).
+        assert_eq!(h.verify("alpha ", &hash_a), Ok(false));
+    }
+
+    #[test]
+    fn corrupt_stored_hash_never_authenticates() {
+        // A truncated / corrupt stored hash must NEVER authenticate. Depending on
+        // where the corruption lands it either fails to parse (typed engine error)
+        // or parses but the derived hash mismatches (Ok(false)); the load-bearing
+        // security invariant is that it is never Ok(true) for the right password.
+        let h = Argon2idHasher::new();
+        let full = h.hash("secret").expect("hash");
+        // Several truncation points, plus a single-byte flip in the hash segment.
+        let mut flipped = full.clone().into_bytes();
+        let last = flipped.len() - 1;
+        flipped[last] ^= 0x01;
+        let flipped = String::from_utf8(flipped).expect("utf8");
+
+        for corrupt in [
+            &full[..full.len() / 2],
+            &full[..full.len() - 3],
+            flipped.as_str(),
+            "not-a-phc-string",
+            "$argon2id$",
+        ] {
+            match h.verify("secret", corrupt) {
+                Ok(true) => panic!("corrupt hash {corrupt:?} authenticated the password!"),
+                // A clean rejection (Ok(false)) or a typed engine error are both
+                // acceptable: the invariant is only that it never authenticates.
+                Ok(false) | Err(AuthError::PasswordHashing(_)) => {}
+                Err(other) => panic!("unexpected error variant for {corrupt:?}: {other:?}"),
+            }
+        }
     }
 }

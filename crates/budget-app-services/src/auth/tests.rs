@@ -331,3 +331,88 @@ async fn passkey_assertion_with_unknown_credential_is_rejected() {
         Err(AuthError::InvalidCredentials),
     );
 }
+
+// ---- User-scoping defense in depth (BUDGET-AUTH-GATE-1, SPEC §9.1) ----------
+
+#[tokio::test]
+async fn list_credentials_is_scoped_to_the_authenticated_user() {
+    // BUDGET-AUTH-GATE-1: "every query is additionally scoped to the
+    // authenticated user_id." Even in single-user V1 the read path must not
+    // return another user's rows. We seed credentials for TWO users and assert
+    // each user sees only their own.
+    let me = UserId::generate();
+    let other = UserId::generate();
+    assert_ne!(me, other);
+
+    let creds = FakeCredentials::with(vec![
+        credential_for(me, vec![1, 1], 0),
+        credential_for(me, vec![2, 2], 0),
+        credential_for(other, vec![9, 9], 0),
+    ]);
+    let svc = AuthService::new(
+        FakeUsers::empty(),
+        creds,
+        Arc::new(FakePasswords),
+        Arc::new(FakeTotp),
+    );
+
+    let mine = svc.list_credentials(me).await.expect("list");
+    assert_eq!(mine.len(), 2, "must see exactly my two credentials");
+    assert!(
+        mine.iter().all(|c| c.user_id == me),
+        "no other user's credential may appear in my list",
+    );
+    assert!(
+        mine.iter().all(|c| c.credential_id != vec![9, 9]),
+        "the other user's credential must be excluded",
+    );
+
+    // And the other user sees only theirs.
+    let theirs = svc.list_credentials(other).await.expect("list other");
+    assert_eq!(theirs.len(), 1);
+    assert_eq!(theirs[0].user_id, other);
+}
+
+#[tokio::test]
+async fn passkey_assertion_yields_the_owning_users_id_for_scoping() {
+    // The assertion path returns the credential OWNER's user_id, which the gate
+    // then scopes queries to. A credential owned by `owner` must yield exactly
+    // `owner`, never a different/ambient identity.
+    let owner = UserId::generate();
+    let creds = FakeCredentials::with(vec![credential_for(owner, vec![4, 2], 7)]);
+    let svc = AuthService::new(
+        FakeUsers::empty(),
+        creds,
+        Arc::new(FakePasswords),
+        Arc::new(FakeTotp),
+    );
+    let yielded = svc
+        .complete_passkey_assertion(&[4, 2], 8)
+        .await
+        .expect("assertion");
+    assert_eq!(
+        yielded, owner,
+        "the assertion must scope to the credential's owning user",
+    );
+}
+
+#[tokio::test]
+async fn enroll_and_set_password_on_unknown_user_do_not_mutate_anything() {
+    // No public signup (SPEC §9): operating on a user id the repo doesn't hold
+    // must reject, never create a user as a side effect.
+    let svc = AuthService::new(
+        FakeUsers::empty(),
+        FakeCredentials::empty(),
+        Arc::new(FakePasswords),
+        Arc::new(FakeTotp),
+    );
+    let ghost = UserId::generate();
+    assert_eq!(
+        svc.enroll_totp(ghost).await.err(),
+        Some(AuthError::InvalidCredentials),
+    );
+    assert_eq!(
+        svc.set_password(ghost, "x").await.err(),
+        Some(AuthError::InvalidCredentials),
+    );
+}

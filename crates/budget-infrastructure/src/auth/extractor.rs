@@ -152,7 +152,7 @@ mod tests {
     use async_trait::async_trait;
     use axum::Router;
     use axum::body::Body;
-    use axum::extract::FromRef;
+    use axum::extract::{FromRef, FromRequestParts};
     use axum::http::{Request, StatusCode};
     use axum::response::IntoResponse;
     use axum::routing::get;
@@ -253,6 +253,34 @@ mod tests {
             .layer(session_layer)
     }
 
+    #[test]
+    fn extractor_rejection_is_a_bare_status_code_no_body() {
+        // Enforce-by-construction (BUDGET-AUTH-GATE-1): the extractor's failure
+        // type is exactly `StatusCode`, not a struct/enum that could carry a body
+        // or a partial identity. A bare 401 status response has no body of its own,
+        // so a failed extraction cannot smuggle data out. This type-level check
+        // pins the rejection shape; the runtime "401 with empty body" behavior is
+        // asserted by `protected_route_rejects_without_a_session` below.
+        //
+        // On a real request an `AuthedUser` is obtainable ONLY through this
+        // `FromRequestParts` impl (which validates the session). The struct has no
+        // public request-taking constructor (`for_test` is `#[cfg(test)]`-only),
+        // so a handler cannot mint identity from request data. Adding any
+        // `AuthedUser::from_*(request-data)` constructor would be the regression
+        // this rule guards against.
+        fn assert_rejection_is_status_code<R>()
+        where
+            R: 'static,
+        {
+            assert_eq!(
+                std::any::TypeId::of::<R>(),
+                std::any::TypeId::of::<StatusCode>(),
+                "the extractor rejection must be a bare StatusCode (no body carrier)",
+            );
+        }
+        assert_rejection_is_status_code::<<AuthedUser as FromRequestParts<TestState>>::Rejection>();
+    }
+
     #[tokio::test]
     async fn unprotected_route_serves_without_a_session() {
         let router = build_router(sample_user());
@@ -286,6 +314,272 @@ mod tests {
             .await
             .expect("body");
         assert!(body.is_empty(), "401 must yield no data");
+    }
+
+    /// Like [`build_router`] but applies the PRODUCTION cookie policy (Secure +
+    /// `HttpOnly` + `SameSite=Strict`) so the issued `Set-Cookie` can be inspected.
+    /// Adds a `/login` and a `/logout` route.
+    fn build_secure_router(user: User) -> Router {
+        let user_id = user.id;
+        // Mirror the production policy in session.rs: Secure + HttpOnly +
+        // SameSite=Strict. (MemoryStore stands in for the Postgres store; the
+        // cookie policy is identical and is what we assert here.)
+        let session_layer = SessionManagerLayer::new(MemoryStore::default())
+            .with_secure(true)
+            .with_http_only(true)
+            .with_same_site(SameSite::Strict)
+            .with_path("/");
+        let state = TestState {
+            auth: AuthState::new(Arc::new(FakeUserRepo { user })),
+        };
+        let login_route =
+            axum::routing::post(
+                move |session: Session| async move { login(session, user_id).await },
+            );
+        Router::new()
+            .route("/protected", get(protected))
+            .route("/login", login_route)
+            .route(
+                "/logout",
+                axum::routing::post(|session: Session| async move {
+                    // Destroying the session is what logout does (BUDGET-AUTH-GATE-1).
+                    session
+                        .delete()
+                        .await
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                }),
+            )
+            .with_state(state)
+            .layer(session_layer)
+    }
+
+    /// Extract the raw `Set-Cookie` header string from a login response.
+    fn set_cookie_of(resp: &axum::response::Response) -> String {
+        resp.headers()
+            .get(axum::http::header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+            .expect("a Set-Cookie header")
+    }
+
+    /// The `name=value` first segment, for replay on a follow-up request.
+    fn cookie_pair(set_cookie: &str) -> String {
+        set_cookie
+            .split(';')
+            .next()
+            .map(str::to_owned)
+            .expect("cookie pair")
+    }
+
+    #[tokio::test]
+    async fn issued_cookie_has_secure_httponly_samesite_strict_flags() {
+        // BUDGET-AUTH-GATE-1 / SPEC §9.1: the session cookie MUST be Secure (HTTPS
+        // only), HttpOnly (no JS access -> XSS can't steal it), SameSite=Strict
+        // (CSRF defense). Assert all three on the real issued header.
+        let router = build_secure_router(sample_user());
+        let login_resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/login")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("login resp");
+        let set_cookie = set_cookie_of(&login_resp).to_ascii_lowercase();
+        assert!(
+            set_cookie.contains("httponly"),
+            "cookie must be HttpOnly: {set_cookie}"
+        );
+        assert!(
+            set_cookie.contains("secure"),
+            "cookie must be Secure: {set_cookie}"
+        );
+        assert!(
+            set_cookie.contains("samesite=strict"),
+            "cookie must be SameSite=Strict: {set_cookie}",
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_destroys_the_session_and_protected_route_then_401s() {
+        // A full login -> access -> logout -> access-again cycle. After logout the
+        // same cookie must no longer authenticate (the server-side session is gone).
+        let router = build_secure_router(sample_user());
+
+        // 1. Log in, capture cookie.
+        let login_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/login")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("login");
+        let cookie = cookie_pair(&set_cookie_of(&login_resp));
+
+        // 2. The cookie authenticates the protected route.
+        let ok = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header(axum::http::header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("protected pre-logout");
+        assert_eq!(
+            ok.status(),
+            StatusCode::OK,
+            "cookie must work before logout"
+        );
+
+        // 3. Log out using the SAME cookie (destroys the server-side session).
+        let logout = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logout")
+                    .header(axum::http::header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("logout");
+        assert_eq!(logout.status(), StatusCode::OK);
+
+        // 4. The same cookie must NO LONGER authenticate (session destroyed).
+        let after = router
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header(axum::http::header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("protected post-logout");
+        assert_eq!(
+            after.status(),
+            StatusCode::UNAUTHORIZED,
+            "a destroyed session's cookie must not authenticate (logout works)",
+        );
+    }
+
+    #[tokio::test]
+    async fn forged_and_tampered_cookies_are_rejected() {
+        // A cookie with a value the server never issued (forged), and a tampered
+        // version of a real cookie, must both 401 — the session id is opaque and
+        // unguessable; a mismatched id resolves to no server-side session.
+        let router = build_secure_router(sample_user());
+
+        // First obtain a real cookie so we can tamper with its value.
+        let login_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/login")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("login");
+        let real = cookie_pair(&set_cookie_of(&login_resp));
+
+        // Tamper: flip the last character of the cookie value.
+        let mut bytes = real.clone().into_bytes();
+        let last = bytes.len() - 1;
+        bytes[last] = if bytes[last] == b'A' { b'B' } else { b'A' };
+        let tampered = String::from_utf8(bytes).expect("utf8");
+        assert_ne!(tampered, real);
+
+        for bad in [
+            "id=totally-made-up-session-id".to_owned(),
+            "id=".to_owned(),
+            tampered,
+        ] {
+            let resp = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/protected")
+                        .header(axum::http::header::COOKIE, &bad)
+                        .body(Body::empty())
+                        .expect("req"),
+                )
+                .await
+                .expect("resp");
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "forged/tampered cookie {bad:?} must be rejected",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_pointing_at_a_deleted_user_fails_closed() {
+        // Defense in depth: a valid session whose user no longer exists must be
+        // treated as unauthenticated (401), never as a partial/empty identity.
+        // The login route writes a DIFFERENT user id than the repo holds.
+        let repo_user = sample_user();
+        let ghost_id = UserId::generate();
+        assert_ne!(repo_user.id, ghost_id);
+
+        let session_layer = SessionManagerLayer::new(MemoryStore::default())
+            .with_secure(false)
+            .with_http_only(true)
+            .with_same_site(SameSite::Strict);
+        let state = TestState {
+            auth: AuthState::new(Arc::new(FakeUserRepo { user: repo_user })),
+        };
+        // Log in AS the ghost (an id the repo will not find).
+        let login_route =
+            axum::routing::post(
+                move |session: Session| async move { login(session, ghost_id).await },
+            );
+        let router = Router::new()
+            .route("/protected", get(protected))
+            .route("/login", login_route)
+            .with_state(state)
+            .layer(session_layer);
+
+        let login_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/login")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("login");
+        let cookie = cookie_pair(&set_cookie_of(&login_resp));
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header(axum::http::header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "a session for a non-existent user must fail closed",
+        );
     }
 
     #[tokio::test]
