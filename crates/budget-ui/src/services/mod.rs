@@ -18,6 +18,7 @@
 pub mod auth;
 mod health;
 pub mod ledger;
+pub mod ledger_edit;
 pub mod month_view;
 pub mod passkey;
 pub mod triage;
@@ -34,6 +35,7 @@ pub use ledger::{
     DayLedgerDto, EnvelopeCategoryDto, EnvelopeSummaryDto, LedgerTransactionDto, MonthLedgerDto,
     get_envelope_summary, get_month_ledger,
 };
+pub use ledger_edit::{InlineEditRequest, InlineEditResult, update_transaction_inline};
 pub use month_view::{CategoryRowDto, MonthViewDto, ensure_month, get_month_view};
 pub use passkey::{
     finish_passkey_authentication, finish_passkey_registration, start_passkey_authentication,
