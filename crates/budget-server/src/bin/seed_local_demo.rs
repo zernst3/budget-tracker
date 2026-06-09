@@ -404,6 +404,92 @@ fn build_accounts(
 }
 
 // ---------------------------------------------------------------------------
+// Persistence — kept out of main() so main stays under the too_many_lines limit.
+// ---------------------------------------------------------------------------
+
+/// The built demo aggregates, ready to persist. Bundled into one struct so the
+/// persistence helper avoids a long argument list (`too_many_arguments`).
+struct DemoData {
+    budget: Budget,
+    categories: Vec<Category>,
+    month: Month,
+    funds: Vec<Fund>,
+    plaid_item: PlaidItem,
+    accounts: Vec<Account>,
+    transactions: Vec<Transaction>,
+}
+
+/// Persist every demo aggregate idempotently, ordered so FK parents precede
+/// children (`PlaidItem` before accounts; month before transactions). Each repo
+/// gets its own connection because `DatabaseConnection` is not `Clone` under the
+/// `SeaORM` `mock` feature (same pattern as `seed_onboarding`).
+async fn persist_all(database_url: &str, data: &DemoData) -> Result<()> {
+    let connect = || async {
+        sea_orm::Database::connect(database_url)
+            .await
+            .context("connecting to the database")
+    };
+
+    // Budget + categories.
+    let budget_repo: Arc<dyn BudgetRepository> =
+        Arc::new(PostgresBudgetRepository::new(connect().await?));
+    budget_repo
+        .save(&data.budget, None)
+        .await
+        .context("saving demo budget")?;
+    for cat in &data.categories {
+        budget_repo
+            .save_category(cat, None)
+            .await
+            .with_context(|| format!("saving category {}", cat.name))?;
+    }
+
+    // Month (idempotent create).
+    let month_repo: Arc<dyn MonthRepository> =
+        Arc::new(PostgresMonthRepository::new(connect().await?));
+    month_repo
+        .create_if_absent(&data.month, None)
+        .await
+        .context("creating demo month")?;
+
+    // Funds.
+    let fund_repo: Arc<dyn FundRepository> =
+        Arc::new(PostgresFundRepository::new(connect().await?));
+    for fund in &data.funds {
+        fund_repo
+            .save(fund, None)
+            .await
+            .with_context(|| format!("saving fund {}", fund.name))?;
+    }
+
+    // PlaidItem + accounts (item must exist before accounts due to FK).
+    let plaid_repo: Arc<dyn PlaidItemRepository> =
+        Arc::new(PostgresPlaidItemRepository::new(connect().await?));
+    plaid_repo
+        .save(&data.plaid_item, None)
+        .await
+        .context("saving fake plaid item")?;
+    for account in &data.accounts {
+        plaid_repo
+            .save_account(account, None)
+            .await
+            .with_context(|| format!("saving account {}", account.name))?;
+    }
+
+    // Pre-settled transactions (month must exist first).
+    let txn_repo: Arc<dyn TransactionRepository> =
+        Arc::new(PostgresTransactionRepository::new(connect().await?));
+    for txn in &data.transactions {
+        txn_repo
+            .save(txn, None)
+            .await
+            .with_context(|| format!("saving demo transaction '{}'", txn.description))?;
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -463,78 +549,25 @@ async fn main() -> Result<()> {
     let transactions =
         build_transactions(user_id, uid, month_id, account_checking_id, content_date);
 
-    // --- Connection factory (DatabaseConnection is not Clone under SeaORM
-    // `mock` feature; each repo gets its own handle, same pattern as
-    // seed_onboarding and AppState::from_connections). -----------------------
-    let connect = || async {
-        sea_orm::Database::connect(&database_url)
-            .await
-            .context("connecting to the database")
+    // --- Persist everything (idempotent; FK-ordered inside the helper). ------
+    let data = DemoData {
+        budget,
+        categories,
+        month,
+        funds: funds.to_vec(),
+        plaid_item,
+        accounts: accounts.to_vec(),
+        transactions: transactions.to_vec(),
     };
-
-    // Budget + categories.
-    let budget_repo: Arc<dyn BudgetRepository> =
-        Arc::new(PostgresBudgetRepository::new(connect().await?));
-    budget_repo
-        .save(&budget, None)
-        .await
-        .context("saving demo budget")?;
-    for cat in &categories {
-        budget_repo
-            .save_category(cat, None)
-            .await
-            .with_context(|| format!("saving category {}", cat.name))?;
-    }
-
-    // Month (idempotent create).
-    let month_repo: Arc<dyn MonthRepository> =
-        Arc::new(PostgresMonthRepository::new(connect().await?));
-    month_repo
-        .create_if_absent(&month, None)
-        .await
-        .context("creating demo month")?;
-
-    // Funds.
-    let fund_repo: Arc<dyn FundRepository> =
-        Arc::new(PostgresFundRepository::new(connect().await?));
-    for fund in &funds {
-        fund_repo
-            .save(fund, None)
-            .await
-            .with_context(|| format!("saving fund {}", fund.name))?;
-    }
-
-    // PlaidItem + accounts (item must exist before accounts due to FK).
-    let plaid_repo: Arc<dyn PlaidItemRepository> =
-        Arc::new(PostgresPlaidItemRepository::new(connect().await?));
-    plaid_repo
-        .save(&plaid_item, None)
-        .await
-        .context("saving fake plaid item")?;
-    for account in &accounts {
-        plaid_repo
-            .save_account(account, None)
-            .await
-            .with_context(|| format!("saving account {}", account.name))?;
-    }
-
-    // Pre-settled transactions (month must exist first).
-    let txn_repo: Arc<dyn TransactionRepository> =
-        Arc::new(PostgresTransactionRepository::new(connect().await?));
-    for txn in &transactions {
-        txn_repo
-            .save(txn, None)
-            .await
-            .with_context(|| format!("saving demo transaction '{}'", txn.description))?;
-    }
+    persist_all(&database_url, &data).await?;
 
     // --- Summary. ------------------------------------------------------------
     println!("seed-local-demo applied (idempotent / re-runnable):");
     println!("  user:                 {user_id} ({email})");
     println!("  tracking_start_date:  {}", user.tracking_start_date);
     println!("  content_date:         {content_date}");
-    println!("  budget:               {} ({budget_id})", budget.name);
-    println!("  categories:           {} rows", categories.len());
+    println!("  budget:               {} ({budget_id})", data.budget.name);
+    println!("  categories:           {} rows", data.categories.len());
     println!(
         "  month:                {}-{month_num:02} (id {month_id})",
         today.year()
