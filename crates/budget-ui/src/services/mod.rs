@@ -12,8 +12,7 @@
 //! deliberate exception (an unauthenticated liveness probe that returns no user
 //! data).
 //!
-//! Phase B4 adds the core read-only month-view server functions: [`ensure_month`]
-//! (lazy-init) and [`get_month_view`] (budget/spent/remaining per category).
+//! Phase B4 adds the `ensure_month` lazy-init server function.
 
 pub mod auth;
 mod health;
@@ -36,7 +35,7 @@ pub use ledger::{
     get_envelope_summary, get_month_ledger,
 };
 pub use ledger_edit::{InlineEditRequest, InlineEditResult, update_transaction_inline};
-pub use month_view::{CategoryRowDto, MonthViewDto, ensure_month, get_month_view};
+pub use month_view::ensure_month;
 pub use passkey::{
     finish_passkey_authentication, finish_passkey_registration, start_passkey_authentication,
     start_passkey_registration,
