@@ -531,10 +531,7 @@ impl FundRepository for MemFundRepo {
             .lock()
             .map_err(poisoned)?
             .iter()
-            .find(|o| {
-                o.origin_month_id == Some(month_id)
-                    && o.source == ObligationSource::Deficit
-            })
+            .find(|o| o.origin_month_id == Some(month_id) && o.source == ObligationSource::Deficit)
             .cloned())
     }
 
@@ -806,6 +803,7 @@ fn expense_txn(h: &Harness, month_id: MonthId, category: CategoryId, amount: Mon
         is_rollover: false,
         is_fund_draw: false,
         matched_transaction_id: None,
+        comment: None,
         created_at: now_ts(),
         updated_at: now_ts(),
     }

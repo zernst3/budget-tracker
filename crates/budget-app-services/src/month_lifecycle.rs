@@ -467,6 +467,7 @@ async fn post_rollover_if_absent(
         is_rollover: true,
         is_fund_draw: false,
         matched_transaction_id: None,
+        comment: None,
         created_at: now,
         updated_at: now,
     };

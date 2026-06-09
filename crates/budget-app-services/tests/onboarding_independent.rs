@@ -76,8 +76,7 @@ use budget_app_services::{
 use budget_domain::budget::Budget;
 use budget_domain::category::Category;
 use budget_domain::enums::{
-    Cadence, CategoryGrp, FundKind, ObligationSource, TransactionSource,
-    TransactionStatus,
+    Cadence, CategoryGrp, FundKind, ObligationSource, TransactionSource, TransactionStatus,
 };
 use budget_domain::fund::Fund;
 use budget_domain::ids::{
@@ -598,10 +597,7 @@ impl FundRepository for MemFundRepo {
     ) -> Result<Option<RepaymentObligation>, RepositoryError> {
         let g = self.obligations.lock().map_err(poisoned)?;
         Ok(g.iter()
-            .find(|o| {
-                o.origin_month_id == Some(month_id)
-                    && o.source == ObligationSource::Deficit
-            })
+            .find(|o| o.origin_month_id == Some(month_id) && o.source == ObligationSource::Deficit)
             .cloned())
     }
 

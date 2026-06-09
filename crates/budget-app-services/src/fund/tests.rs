@@ -169,10 +169,7 @@ impl FundRepository for FakeFundRepo {
         Ok(store
             .obligations
             .iter()
-            .find(|o| {
-                o.origin_month_id == Some(month_id)
-                    && o.source == ObligationSource::Deficit
-            })
+            .find(|o| o.origin_month_id == Some(month_id) && o.source == ObligationSource::Deficit)
             .cloned())
     }
 
@@ -945,6 +942,7 @@ async fn tag_sinking_payout_draws_reserve_and_resets_clock_forward() {
         is_rollover: false,
         is_fund_draw: false,
         matched_transaction_id: None,
+        comment: None,
         created_at: now(),
         updated_at: now(),
     };

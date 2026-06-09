@@ -848,6 +848,7 @@ fn matched_placeholder(user_id: UserId, matched: TransactionId) -> Transaction {
         is_rollover: false,
         is_fund_draw: false,
         matched_transaction_id: Some(matched),
+        comment: None,
         created_at: now,
         updated_at: now,
     }

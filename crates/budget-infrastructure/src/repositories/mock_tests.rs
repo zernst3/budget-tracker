@@ -149,6 +149,7 @@ fn sample_txn_model(
         is_rollover,
         is_fund_draw: false,
         matched_transaction_id: None,
+        comment: None,
         created_at: now_fixed().into(),
         updated_at: now_fixed().into(),
     }

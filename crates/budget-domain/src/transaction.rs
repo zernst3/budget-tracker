@@ -77,6 +77,13 @@ pub struct Transaction {
     /// `removed`) reads this to find and restore the placeholder, then clears it
     /// back to `None`.
     pub matched_transaction_id: Option<TransactionId>,
+    /// User's free-text note on this expense (`SPEC §5` / `§7`, migration m0005).
+    /// Distinct from [`Transaction::description`] (the Plaid/merchant string).
+    /// `None` = no note.
+    ///
+    /// Inline-editable on a transaction row in the month ledger; also settable
+    /// during Pending triage. No validation — any UTF-8 string is accepted.
+    pub comment: Option<String>,
     /// When the row was created (UTC, `DOMAIN-7`).
     pub created_at: DateTime<Utc>,
     /// When the row was last updated (UTC, `DOMAIN-7`).

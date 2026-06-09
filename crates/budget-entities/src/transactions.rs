@@ -108,6 +108,10 @@ pub struct Model {
     /// from budget math so the placeholder/real pair counts exactly once
     /// (`BUDGET-NO-DOUBLE-CHARGE-1`).
     pub matched_transaction_id: Option<Uuid>,
+    /// User's free-text note on this expense (`SPEC §5` / `§7`, migration m0005).
+    /// Distinct from `description` (the Plaid/merchant string). NULL = no note.
+    /// Inline-editable in the ledger; also settable during Pending triage.
+    pub comment: Option<String>,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
 }

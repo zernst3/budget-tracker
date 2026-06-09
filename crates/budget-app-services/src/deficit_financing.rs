@@ -251,6 +251,7 @@ impl DeficitFinancingService {
             is_rollover: false,
             is_fund_draw: false,
             matched_transaction_id: None,
+            comment: None,
             created_at: now,
             updated_at: now,
         };

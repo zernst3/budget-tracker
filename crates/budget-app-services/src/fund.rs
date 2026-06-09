@@ -188,6 +188,7 @@ impl FundService {
             is_rollover: false,
             is_fund_draw: false,
             matched_transaction_id: None,
+            comment: None,
             created_at: now,
             updated_at: now,
         };
@@ -524,6 +525,7 @@ impl FundService {
             is_rollover: false,
             is_fund_draw: false,
             matched_transaction_id: None,
+            comment: None,
             created_at: now,
             updated_at: now,
         };
@@ -614,6 +616,7 @@ impl FundService {
             is_rollover: false,
             is_fund_draw: false,
             matched_transaction_id: None,
+            comment: None,
             created_at: now,
             updated_at: now,
         };
@@ -830,6 +833,7 @@ fn purchase_txn(
         is_rollover: false,
         is_fund_draw,
         matched_transaction_id: None,
+        comment: None,
         created_at: now,
         updated_at: now,
     }

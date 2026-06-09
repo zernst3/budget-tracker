@@ -192,9 +192,7 @@ impl FundRepository for FakeFundRepo {
             .map_err(poisoned)?
             .obligations
             .iter()
-            .find(|o| {
-                o.origin_month_id == Some(month_id) && o.source == ObligationSource::Deficit
-            })
+            .find(|o| o.origin_month_id == Some(month_id) && o.source == ObligationSource::Deficit)
             .cloned())
     }
     async fn list_buffer_financed_transaction_ids(
@@ -757,6 +755,7 @@ fn expense(
         is_rollover: false,
         is_fund_draw: false,
         matched_transaction_id: None,
+        comment: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
@@ -1173,7 +1172,11 @@ async fn single_month_financing_still_suppresses_the_rollover() {
         )
         .await
         .expect("finance");
-    assert_eq!(ob.status, ObligationStatus::Paid, "months==1 settles at once");
+    assert_eq!(
+        ob.status,
+        ObligationStatus::Paid,
+        "months==1 settles at once"
+    );
 
     let rolled = h
         .lifecycle

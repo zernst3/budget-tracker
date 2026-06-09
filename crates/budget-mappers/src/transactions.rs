@@ -99,6 +99,7 @@ fn build_transaction(m: transactions::Model, amount: Money) -> Transaction {
         is_rollover: m.is_rollover,
         is_fund_draw: m.is_fund_draw,
         matched_transaction_id: m.matched_transaction_id.map(TransactionId::new),
+        comment: m.comment,
         created_at: m.created_at.with_timezone(&Utc),
         updated_at: m.updated_at.with_timezone(&Utc),
     }
@@ -233,6 +234,9 @@ pub fn plaid_dto_to_domain(
         is_fund_draw: false,
         // A freshly-ingested Plaid row is never a matched placeholder.
         matched_transaction_id: None,
+        // Plaid rows land without a user note; the user adds one later via
+        // the ledger or triage UI (SPEC §7).
+        comment: None,
         created_at: now,
         updated_at: now,
     })
@@ -260,6 +264,7 @@ pub fn domain_to_active_model(v: &Transaction) -> transactions::ActiveModel {
         is_rollover: Set(v.is_rollover),
         is_fund_draw: Set(v.is_fund_draw),
         matched_transaction_id: Set(v.matched_transaction_id.map(|id| id.value())),
+        comment: Set(v.comment.clone()),
         created_at: Set(v.created_at.into()),
         updated_at: Set(v.updated_at.into()),
     }
@@ -290,6 +295,7 @@ mod tests {
             is_rollover: false,
             is_fund_draw: false,
             matched_transaction_id: None,
+            comment: None,
             created_at: now.into(),
             updated_at: now.into(),
         }
@@ -397,6 +403,71 @@ mod tests {
         let domain = model_to_domain(m).unwrap_or_else(|_| unreachable!());
         assert_eq!(domain.matched_transaction_id, None);
         assert!(!domain.is_matched_placeholder());
+    }
+
+    #[test]
+    fn comment_round_trips_some_and_none() {
+        // SPEC §5 / §7 (m0005): comment must survive read and write for both
+        // Some (a user note) and None (no note yet).
+
+        // Some — a row that already has a note.
+        let mut m = sample_model(Decimal::new(-1250, 2));
+        m.comment = Some("birthday dinner".to_owned());
+        let domain = model_to_domain(m).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            domain.comment,
+            Some("birthday dinner".to_owned()),
+            "comment Some preserved on read"
+        );
+        let active = domain_to_active_model(&domain);
+        assert_eq!(
+            active.comment,
+            sea_orm::ActiveValue::Set(Some("birthday dinner".to_owned())),
+            "comment Some preserved on write"
+        );
+
+        // None — most rows start with no note.
+        let m2 = sample_model(Decimal::new(-500, 2));
+        let domain2 = model_to_domain(m2).unwrap_or_else(|_| unreachable!());
+        assert_eq!(domain2.comment, None, "comment None preserved on read");
+        let active2 = domain_to_active_model(&domain2);
+        assert_eq!(
+            active2.comment,
+            sea_orm::ActiveValue::Set(None),
+            "comment None preserved on write"
+        );
+    }
+
+    #[test]
+    fn plaid_dto_lands_with_no_comment() {
+        // Freshly-ingested Plaid rows carry no user note (SPEC §7); the user
+        // adds one later via the ledger or triage UI.
+        use budget_domain::plaid_api::PlaidTransaction;
+
+        let now = Utc.with_ymd_and_hms(2026, 6, 5, 12, 0, 0).unwrap();
+        let dto = PlaidTransaction {
+            transaction_id: "plaid-abc".to_owned(),
+            account_id: "acc-1".to_owned(),
+            amount: Decimal::new(1500, 2), // Plaid positive = outflow
+            date: NaiveDate::from_ymd_opt(2026, 6, 5).unwrap_or(NaiveDate::MIN),
+            name: "Whole Foods".to_owned(),
+            pending: false,
+            pending_transaction_id: None,
+        };
+        let domain = plaid_dto_to_domain(
+            &dto,
+            TransactionId::new(Uuid::new_v4()),
+            UserId::new(Uuid::new_v4()),
+            MonthId::new(Uuid::new_v4()),
+            None,
+            budget_domain::enums::TransactionStatus::Settled,
+            now,
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            domain.comment, None,
+            "freshly-ingested Plaid row has no comment"
+        );
     }
 
     #[test]

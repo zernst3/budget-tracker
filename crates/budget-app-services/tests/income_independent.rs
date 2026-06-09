@@ -79,8 +79,8 @@ use budget_app_services::{FundService, MonthLifecycleService, ServiceError};
 use budget_domain::budget::Budget;
 use budget_domain::category::Category;
 use budget_domain::enums::{
-    Cadence, CategoryGrp, FundKind, IncomeKind, IncomeMode, ObligationSource,
-    PaycheckType, SurplusRouting, TransactionSource, TransactionStatus,
+    Cadence, CategoryGrp, FundKind, IncomeKind, IncomeMode, ObligationSource, PaycheckType,
+    SurplusRouting, TransactionSource, TransactionStatus,
 };
 use budget_domain::fund::Fund;
 use budget_domain::ids::{
@@ -275,10 +275,7 @@ impl FundRepository for MemFundRepo {
     ) -> Result<Option<RepaymentObligation>, RepositoryError> {
         let g = self.obligations.lock().map_err(poisoned)?;
         Ok(g.iter()
-            .find(|o| {
-                o.origin_month_id == Some(month_id)
-                    && o.source == ObligationSource::Deficit
-            })
+            .find(|o| o.origin_month_id == Some(month_id) && o.source == ObligationSource::Deficit)
             .cloned())
     }
 
@@ -761,6 +758,7 @@ fn base_txn(user_id: UserId, month_id: MonthId, amount: Money) -> Transaction {
         is_rollover: false,
         is_fund_draw: false,
         matched_transaction_id: None,
+        comment: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }

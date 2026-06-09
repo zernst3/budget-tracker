@@ -57,8 +57,7 @@ use budget_app_services::{MonthLifecycleService, net_leftover};
 use budget_domain::budget::Budget;
 use budget_domain::category::Category;
 use budget_domain::enums::{
-    Cadence, CategoryGrp, IncomeKind, ObligationSource, TransactionSource,
-    TransactionStatus,
+    Cadence, CategoryGrp, IncomeKind, ObligationSource, TransactionSource, TransactionStatus,
 };
 use budget_domain::fund::Fund;
 use budget_domain::ids::{BudgetId, CategoryId, CategoryKey, MonthId, TransactionId, UserId};
@@ -519,10 +518,7 @@ impl FundRepository for MemFundRepo {
             .lock()
             .map_err(poisoned)?
             .iter()
-            .find(|o| {
-                o.origin_month_id == Some(month_id)
-                    && o.source == ObligationSource::Deficit
-            })
+            .find(|o| o.origin_month_id == Some(month_id) && o.source == ObligationSource::Deficit)
             .cloned())
     }
 
@@ -709,6 +705,7 @@ fn txn(h: &Harness, month_id: MonthId, amount: Money) -> Transaction {
         is_rollover: false,
         is_fund_draw: false,
         matched_transaction_id: None,
+        comment: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
