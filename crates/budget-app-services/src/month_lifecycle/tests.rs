@@ -392,6 +392,18 @@ impl TransactionRepository for FakeTransactionRepo {
             .collect())
     }
 
+    async fn find_expected_matched_to(
+        &self,
+        real_transaction_id: TransactionId,
+    ) -> Result<Option<Transaction>, RepositoryError> {
+        let store = self.store.lock().map_err(poisoned)?;
+        Ok(store
+            .txns
+            .iter()
+            .find(|t| t.matched_transaction_id == Some(real_transaction_id))
+            .cloned())
+    }
+
     async fn category_spent_for_month(
         &self,
         _month_id: MonthId,
@@ -529,7 +541,23 @@ impl FundRepository for FakeFundRepo {
         Ok(store
             .obligations
             .iter()
-            .find(|o| o.transaction_id == transaction_id)
+            .find(|o| o.transaction_id == Some(transaction_id))
+            .cloned())
+    }
+
+    async fn find_active_deficit_obligation_for_month(
+        &self,
+        month_id: MonthId,
+    ) -> Result<Option<RepaymentObligation>, RepositoryError> {
+        let store = self.store.lock().map_err(poisoned)?;
+        Ok(store
+            .obligations
+            .iter()
+            .find(|o| {
+                o.origin_month_id == Some(month_id)
+                    && o.source == budget_domain::enums::ObligationSource::Deficit
+                    && o.status == budget_domain::enums::ObligationStatus::Active
+            })
             .cloned())
     }
 
@@ -542,7 +570,7 @@ impl FundRepository for FakeFundRepo {
             .obligations
             .iter()
             .filter(|o| o.user_id == user_id)
-            .map(|o| o.transaction_id)
+            .filter_map(|o| o.transaction_id)
             .collect())
     }
 
@@ -716,6 +744,7 @@ fn base_txn(h: &Harness, month_id: MonthId, amount: Money) -> Transaction {
         income_kind: None,
         is_rollover: false,
         is_fund_draw: false,
+        matched_transaction_id: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
@@ -868,7 +897,9 @@ async fn rollover_excludes_buffer_financed_full_price_but_includes_installment()
             id: RepaymentObligationId::generate(),
             user_id: h.user_id,
             fund_id: FundId::generate(),
-            transaction_id: full_price_id,
+            source: budget_domain::enums::ObligationSource::LargePurchase,
+            transaction_id: Some(full_price_id),
+            origin_month_id: None,
             total_amount: Money::from_major(1_200),
             remaining_amount: Money::from_major(1_100),
             installment_amount: Money::from_major(100),

@@ -328,8 +328,17 @@ impl MonthLifecycleService {
     /// (`SPEC §4.3`, `D5`).
     ///
     /// Returns [`Money::ZERO`] when there is no prior month (the genesis month),
-    /// so the first month opens with a zero rollover.
-    async fn prior_month_net(
+    /// so the first month opens with a zero rollover. Also returns
+    /// [`Money::ZERO`] when the prior month's deficit was electively financed
+    /// (`SPEC §12` D9): the obligation's installments carry it instead of the
+    /// rollover (`BUDGET-DEFICIT-FINANCING-1`).
+    ///
+    /// `pub(crate)` so the deficit-financing suppression is assertable in tests;
+    /// it is not part of the public service API.
+    ///
+    /// # Errors
+    /// [`DomainError`] on any persistence failure.
+    pub(crate) async fn prior_month_net(
         &self,
         user_id: UserId,
         year: i32,
@@ -341,16 +350,45 @@ impl MonthLifecycleService {
             return Ok(Money::ZERO);
         };
 
-        // The prior month's budget version supplies which categories are funds
+        // SPEC §12 D9 (BUDGET-DEFICIT-FINANCING-1): if the prior month's deficit was
+        // electively financed, it must NOT roll forward in full — the obligation's
+        // compulsory installments carry it instead (the first installment is posted
+        // into THIS month's Other by finance_deficit). So a financed prior month
+        // contributes a ZERO rollover; the deficit lives in the obligation, counted
+        // exactly once across the installment chain.
+        if self
+            .funds
+            .find_active_deficit_obligation_for_month(prior.id)
+            .await?
+            .is_some()
+        {
+            return Ok(Money::ZERO);
+        }
+
+        self.month_net_for(&prior).await
+    }
+
+    /// The D5 net leftover OF a specific month (`SPEC §4.3`, `D5`) — the signed
+    /// figure that, when negative, is the month's deficit. Shared by the rollover
+    /// path ([`Self::prior_month_net`]) and deficit-financing detection
+    /// (`BUDGET-DEFICIT-FINANCING-1`) so the two cannot drift.
+    ///
+    /// Does NOT apply the deficit-financing suppression — it is the raw net of the
+    /// month's own rows; callers decide whether a financed deficit rolls forward.
+    ///
+    /// # Errors
+    /// [`DomainError`] on any persistence failure.
+    pub async fn month_net_for(&self, month: &Month) -> Result<Money, DomainError> {
+        // The month's budget version supplies which categories are funds
         // (BUDGET-FUND-EARMARK-1: fund contributions are excluded from the net).
-        let categories = self.budgets.list_categories(prior.budget_id).await?;
+        let categories = self.budgets.list_categories(month.budget_id).await?;
         let fund_ids: Vec<_> = categories
             .iter()
             .filter(|c| c.is_sinking_fund())
             .map(|c| c.id)
             .collect();
 
-        let txns = self.transactions.list_for_month(prior.id).await?;
+        let txns = self.transactions.list_for_month(month.id).await?;
 
         // SPEC §4.9 D7: buffer-financed full-price purchases post for tracking
         // only with zero month-budget impact; they are excluded from the expense
@@ -358,11 +396,13 @@ impl MonthLifecycleService {
         // expenses) are included and net normally.
         let buffer_financed_txn_ids = self
             .funds
-            .list_buffer_financed_transaction_ids(user_id)
+            .list_buffer_financed_transaction_ids(month.user_id)
             .await?;
 
         let actual_income = actual_income_sum(&txns);
-        let expected_income = self.income.expected_income(user_id, py, pm);
+        let expected_income = self
+            .income
+            .expected_income(month.user_id, month.year, month.month);
         let expense_remaining = expense_remaining_sum(&txns, &fund_ids, &buffer_financed_txn_ids);
 
         Ok(net_leftover(
@@ -423,6 +463,7 @@ async fn post_rollover_if_absent(
         income_kind: None,
         is_rollover: true,
         is_fund_draw: false,
+        matched_transaction_id: None,
         created_at: now,
         updated_at: now,
     };

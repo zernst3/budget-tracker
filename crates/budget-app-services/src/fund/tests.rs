@@ -29,7 +29,8 @@ use chrono::{NaiveDate, Utc};
 use budget_domain::budget::Budget;
 use budget_domain::category::Category;
 use budget_domain::enums::{
-    Cadence, CategoryGrp, FundKind, ObligationStatus, TransactionSource, TransactionStatus,
+    Cadence, CategoryGrp, FundKind, ObligationSource, ObligationStatus, TransactionSource,
+    TransactionStatus,
 };
 use budget_domain::fund::Fund;
 use budget_domain::ids::{
@@ -156,7 +157,23 @@ impl FundRepository for FakeFundRepo {
         Ok(store
             .obligations
             .iter()
-            .find(|o| o.transaction_id == transaction_id)
+            .find(|o| o.transaction_id == Some(transaction_id))
+            .cloned())
+    }
+
+    async fn find_active_deficit_obligation_for_month(
+        &self,
+        month_id: MonthId,
+    ) -> Result<Option<RepaymentObligation>, RepositoryError> {
+        let store = self.store.lock().map_err(poisoned)?;
+        Ok(store
+            .obligations
+            .iter()
+            .find(|o| {
+                o.origin_month_id == Some(month_id)
+                    && o.source == ObligationSource::Deficit
+                    && o.status == ObligationStatus::Active
+            })
             .cloned())
     }
 
@@ -169,7 +186,7 @@ impl FundRepository for FakeFundRepo {
             .obligations
             .iter()
             .filter(|o| o.user_id == user_id)
-            .map(|o| o.transaction_id)
+            .filter_map(|o| o.transaction_id)
             .collect())
     }
 
@@ -372,6 +389,18 @@ impl TransactionRepository for FakeTransactionRepo {
             .filter(|t| t.month_id == month_id && t.status == TransactionStatus::Expected)
             .cloned()
             .collect())
+    }
+
+    async fn find_expected_matched_to(
+        &self,
+        real_transaction_id: TransactionId,
+    ) -> Result<Option<Transaction>, RepositoryError> {
+        let store = self.store.lock().map_err(poisoned)?;
+        Ok(store
+            .txns
+            .iter()
+            .find(|t| t.matched_transaction_id == Some(real_transaction_id))
+            .cloned())
     }
 
     async fn category_spent_for_month(
@@ -916,6 +945,7 @@ async fn tag_sinking_payout_draws_reserve_and_resets_clock_forward() {
         income_kind: None,
         is_rollover: false,
         is_fund_draw: false,
+        matched_transaction_id: None,
         created_at: now(),
         updated_at: now(),
     };
@@ -1051,7 +1081,9 @@ async fn buffer_health_for_reads_obligations() {
             id: RepaymentObligationId::generate(),
             user_id: h.user_id,
             fund_id,
-            transaction_id: TransactionId::generate(),
+            source: ObligationSource::LargePurchase,
+            transaction_id: Some(TransactionId::generate()),
+            origin_month_id: None,
             total_amount: Money::from_major(500),
             remaining_amount: Money::from_major(500),
             installment_amount: Money::from_major(100),

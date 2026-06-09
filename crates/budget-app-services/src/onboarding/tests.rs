@@ -407,6 +407,17 @@ impl TransactionRepository for FakeTransactionRepo {
             .cloned()
             .collect())
     }
+    async fn find_expected_matched_to(
+        &self,
+        real_transaction_id: TransactionId,
+    ) -> Result<Option<Transaction>, RepositoryError> {
+        let store = self.store.lock().map_err(poisoned)?;
+        Ok(store
+            .txns
+            .iter()
+            .find(|t| t.matched_transaction_id == Some(real_transaction_id))
+            .cloned())
+    }
     async fn category_spent_for_month(
         &self,
         _month_id: MonthId,
@@ -537,7 +548,22 @@ impl FundRepository for FakeFundRepo {
         Ok(store
             .obligations
             .iter()
-            .find(|o| o.transaction_id == transaction_id)
+            .find(|o| o.transaction_id == Some(transaction_id))
+            .cloned())
+    }
+    async fn find_active_deficit_obligation_for_month(
+        &self,
+        month_id: MonthId,
+    ) -> Result<Option<RepaymentObligation>, RepositoryError> {
+        let store = self.store.lock().map_err(poisoned)?;
+        Ok(store
+            .obligations
+            .iter()
+            .find(|o| {
+                o.origin_month_id == Some(month_id)
+                    && o.source == budget_domain::enums::ObligationSource::Deficit
+                    && o.status == budget_domain::enums::ObligationStatus::Active
+            })
             .cloned())
     }
     async fn list_buffer_financed_transaction_ids(
@@ -549,7 +575,7 @@ impl FundRepository for FakeFundRepo {
             .obligations
             .iter()
             .filter(|o| o.user_id == user_id)
-            .map(|o| o.transaction_id)
+            .filter_map(|o| o.transaction_id)
             .collect())
     }
     async fn save_obligation(

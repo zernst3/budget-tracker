@@ -384,6 +384,12 @@ impl FundRepository for FakeFundRepo {
     ) -> Result<Option<RepaymentObligation>, RepositoryError> {
         Ok(None)
     }
+    async fn find_active_deficit_obligation_for_month(
+        &self,
+        _month_id: MonthId,
+    ) -> Result<Option<RepaymentObligation>, RepositoryError> {
+        Ok(None)
+    }
     async fn list_buffer_financed_transaction_ids(
         &self,
         _user_id: UserId,
@@ -438,6 +444,12 @@ impl TransactionRepository for FakeTxnRepo {
         _month_id: MonthId,
     ) -> Result<Vec<Transaction>, RepositoryError> {
         Ok(vec![])
+    }
+    async fn find_expected_matched_to(
+        &self,
+        _real_transaction_id: TransactionId,
+    ) -> Result<Option<Transaction>, RepositoryError> {
+        Ok(None)
     }
     async fn category_spent_for_month(
         &self,

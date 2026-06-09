@@ -66,6 +66,17 @@ pub struct Transaction {
     /// and therefore COUNT. The buffer-financed full-price tracking row uses its own
     /// obligation-keyed exclusion (`SPEC §4.9` D7) and leaves this `false`.
     pub is_fund_draw: bool,
+    /// The real transaction that settled this `expected` placeholder
+    /// (`SPEC §4.10` / `§12`, `BUDGET-SETTLE-ON-MATCH-1`). `Some` ONLY on an
+    /// `expected` placeholder that has been matched to a real charge; `None`
+    /// otherwise.
+    ///
+    /// While this is `Some`, the placeholder is **matched** and is excluded from
+    /// budget math (the real transaction counts instead), so the pair counts
+    /// exactly once (`BUDGET-NO-DOUBLE-CHARGE-1`). The reverse path (Plaid
+    /// `removed`) reads this to find and restore the placeholder, then clears it
+    /// back to `None`.
+    pub matched_transaction_id: Option<TransactionId>,
     /// When the row was created (UTC, `DOMAIN-7`).
     pub created_at: DateTime<Utc>,
     /// When the row was last updated (UTC, `DOMAIN-7`).
@@ -85,5 +96,18 @@ impl Transaction {
     #[must_use]
     pub const fn is_income(&self) -> bool {
         self.income_kind.is_some()
+    }
+
+    /// `true` when this is an `expected` placeholder that has been matched to a
+    /// real transaction (`BUDGET-SETTLE-ON-MATCH-1`). A matched placeholder no
+    /// longer reserves budget — the real transaction it links to counts instead,
+    /// so the pair counts exactly once (`BUDGET-NO-DOUBLE-CHARGE-1`).
+    ///
+    /// This is keyed on the link, not on status: only an `expected` row ever
+    /// carries `matched_transaction_id`, but checking the status as well keeps the
+    /// predicate honest if a non-placeholder row is ever mislabeled.
+    #[must_use]
+    pub const fn is_matched_placeholder(&self) -> bool {
+        matches!(self.status, TransactionStatus::Expected) && self.matched_transaction_id.is_some()
     }
 }

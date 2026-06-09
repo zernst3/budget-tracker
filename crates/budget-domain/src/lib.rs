@@ -53,8 +53,8 @@ pub use budget::Budget;
 pub use category::Category;
 pub use enums::{
     AccountType, Cadence, CategoryGrp, FundKind, IncomeKind, IncomeMode, MonthStatus,
-    ObligationStatus, PaycheckType, SettleType, SurplusRouting, TransactionSource,
-    TransactionStatus,
+    ObligationSource, ObligationStatus, PaycheckType, SettleType, SurplusRouting,
+    TransactionSource, TransactionStatus,
 };
 pub use error::{DomainError, RepositoryError, ValidationError};
 pub use fund::Fund;

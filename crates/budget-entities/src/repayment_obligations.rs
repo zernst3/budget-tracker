@@ -29,6 +29,17 @@ pub enum ObligationStatus {
     Paid,
 }
 
+/// What the obligation amortizes (SPEC §5 / §12 D9, `BUDGET-DEFICIT-FINANCING-1`):
+/// a single buffer-financed large purchase, or a financed accumulated deficit.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "obligation_source")]
+pub enum ObligationSource {
+    #[sea_orm(string_value = "large_purchase")]
+    LargePurchase,
+    #[sea_orm(string_value = "deficit")]
+    Deficit,
+}
+
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "repayment_obligations")]
 pub struct Model {
@@ -37,8 +48,14 @@ pub struct Model {
     pub user_id: Uuid,
     /// The buffer fund being repaid.
     pub fund_id: Uuid,
+    /// What the principal represents (D9, §12). Real pg enum (`ENTITIES-12`).
+    pub source: ObligationSource,
     /// The large-purchase transaction (marked spent in full at purchase; D7, §12).
-    pub transaction_id: Uuid,
+    /// NULL for a financed deficit (D9) — no single source transaction.
+    pub transaction_id: Option<Uuid>,
+    /// The closed month whose accumulated deficit was financed (D9, §12). NULL for
+    /// a large purchase.
+    pub origin_month_id: Option<Uuid>,
     /// Full purchase price. NUMERIC — never f64 (`BUDGET-MONEY-1`).
     pub total_amount: Decimal,
     /// Remaining to repay. NUMERIC — never f64 (`BUDGET-MONEY-1`).
@@ -76,6 +93,14 @@ pub enum Relation {
         on_delete = "Restrict"
     )]
     Transaction,
+    #[sea_orm(
+        belongs_to = "super::months::Entity",
+        from = "Column::OriginMonthId",
+        to = "super::months::Column::Id",
+        on_update = "NoAction",
+        on_delete = "Restrict"
+    )]
+    OriginMonth,
 }
 
 impl Related<super::users::Entity> for Entity {
@@ -93,6 +118,12 @@ impl Related<super::funds::Entity> for Entity {
 impl Related<super::transactions::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Transaction.def()
+    }
+}
+
+impl Related<super::months::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::OriginMonth.def()
     }
 }
 

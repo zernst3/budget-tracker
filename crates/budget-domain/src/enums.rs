@@ -159,6 +159,29 @@ pub enum ObligationStatus {
     Paid,
 }
 
+/// What a [`crate::repayment_obligation::RepaymentObligation`] amortizes
+/// (`SPEC §5`, `§12` D9; entity enum `obligation_source`;
+/// `BUDGET-DEFICIT-FINANCING-1`).
+///
+/// Both sources reuse the SAME repayment machinery (compulsory monthly
+/// installments flowing back into the buffer until `remaining = 0`); the source
+/// only records what the principal represents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObligationSource {
+    /// A buffer-financed large purchase (`SPEC §4.9` D7): the principal is one
+    /// purchase transaction, recorded in
+    /// [`crate::repayment_obligation::RepaymentObligation::transaction_id`].
+    #[default]
+    LargePurchase,
+    /// A financed accumulated monthly deficit (`SPEC §12` D9): the principal is
+    /// the closed month's net deficit (many small expenses that summed into one
+    /// large hit), recorded in
+    /// [`crate::repayment_obligation::RepaymentObligation::origin_month_id`]; there
+    /// is no single source `transaction_id`.
+    Deficit,
+}
+
 /// How expected monthly income is computed (`SPEC §4.8`; entity enum `income_mode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

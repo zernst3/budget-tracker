@@ -234,9 +234,24 @@ impl TransactionRepository for FakeTxnRepo {
             .collect())
     }
 
+    async fn find_expected_matched_to(
+        &self,
+        real_transaction_id: TransactionId,
+    ) -> Result<Option<Transaction>, RepositoryError> {
+        Ok(self
+            .rows
+            .lock()
+            .map_err(poisoned)?
+            .iter()
+            .find(|t| t.matched_transaction_id == Some(real_transaction_id))
+            .cloned())
+    }
+
     /// Computes the signed budget-counting (settled + expected; pending excluded)
-    /// sum per category, mirroring `BUDGET-STATUS-DRIVES-INCLUSION-1`. Used by the
-    /// settlement-reversal test to feed `fixed_category_spent`.
+    /// sum per category, mirroring `BUDGET-STATUS-DRIVES-INCLUSION-1`. A matched
+    /// expected placeholder is excluded (it links to a real txn that counts
+    /// instead, `BUDGET-SETTLE-ON-MATCH-1`). Used by the settlement-reversal test
+    /// to feed `fixed_category_spent`.
     async fn category_spent_for_month(
         &self,
         month_id: MonthId,
@@ -247,7 +262,7 @@ impl TransactionRepository for FakeTxnRepo {
             let counts = matches!(
                 t.status,
                 TransactionStatus::Settled | TransactionStatus::Expected
-            );
+            ) && !t.is_matched_placeholder();
             if !counts || t.month_id != month_id {
                 continue;
             }
@@ -272,6 +287,7 @@ impl TransactionRepository for FakeTxnRepo {
                         t.status,
                         TransactionStatus::Settled | TransactionStatus::Expected
                     )
+                    && !t.is_matched_placeholder()
             })
             .fold(Money::ZERO, |acc, t| acc + t.amount);
         Ok(MonthNet { month_id, net })

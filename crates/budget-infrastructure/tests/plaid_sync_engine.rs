@@ -232,6 +232,19 @@ impl TransactionRepository for FakeTxnRepo {
             .collect())
     }
 
+    async fn find_expected_matched_to(
+        &self,
+        real_transaction_id: TransactionId,
+    ) -> Result<Option<Transaction>, RepositoryError> {
+        Ok(self
+            .rows
+            .lock()
+            .map_err(poisoned)?
+            .iter()
+            .find(|t| t.matched_transaction_id == Some(real_transaction_id))
+            .cloned())
+    }
+
     async fn category_spent_for_month(
         &self,
         _month_id: MonthId,
@@ -813,5 +826,116 @@ async fn reconcile_window_clamps_to_genesis_and_skips_old_rows() {
         rows.iter()
             .all(|t| t.plaid_transaction_id.as_deref() != Some("old")),
         "the pre-genesis row is excluded by the reconcile clamp (BUDGET-CUTOVER-1)"
+    );
+}
+
+/// A manual `expected` placeholder matched to `matched` (`SPEC §4.10`).
+fn matched_placeholder(user_id: UserId, matched: TransactionId) -> Transaction {
+    let now = Utc::now();
+    Transaction {
+        id: TransactionId::generate(),
+        user_id,
+        month_id: MonthId::generate(),
+        category_id: None,
+        account_id: None,
+        date: date(2026, 6, 5),
+        amount: budget_domain::Money::from_major(-800),
+        description: "AirBnB (expected)".to_owned(),
+        source: budget_domain::enums::TransactionSource::Manual,
+        plaid_transaction_id: None,
+        status: TransactionStatus::Expected,
+        income_kind: None,
+        is_rollover: false,
+        is_fund_draw: false,
+        matched_transaction_id: Some(matched),
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+#[tokio::test]
+async fn removed_after_match_restores_the_placeholder_via_stored_link() {
+    // BUDGET-SETTLE-ON-MATCH-1 reverse path: a real Plaid charge has been matched
+    // to an expected placeholder (matched_transaction_id set on the placeholder).
+    // When Plaid `removed`s the real charge, the engine must read the stored link,
+    // RESTORE the placeholder (clear the link), and delete the real row.
+    let page1 = PlaidSyncPage {
+        added: vec![plaid_txn(
+            "real-1",
+            Decimal::new(80000, 2),
+            date(2026, 6, 5),
+            false,
+        )],
+        modified: vec![],
+        removed: vec![],
+        accounts: vec![],
+        next_cursor: "c1".to_owned(),
+        has_more: false,
+    };
+    let h = harness_with(vec![page1], None);
+    let item = PlaidItemId::generate();
+    h.engine
+        .sync_item(item, h.user_id, "tok", date(2026, 6, 1), date(2026, 6, 8))
+        .await
+        .unwrap();
+
+    // The real charge is now stored; capture its id and link a placeholder to it.
+    let real_id = {
+        let rows = h.txns.rows.lock().unwrap();
+        rows.iter()
+            .find(|t| t.plaid_transaction_id.as_deref() == Some("real-1"))
+            .unwrap()
+            .id
+    };
+    let placeholder = matched_placeholder(h.user_id, real_id);
+    let placeholder_id = placeholder.id;
+    h.txns.rows.lock().unwrap().push(placeholder);
+
+    // Plaid removes the real charge.
+    let page2 = PlaidSyncPage {
+        added: vec![],
+        modified: vec![],
+        removed: vec!["real-1".to_owned()],
+        accounts: vec![],
+        next_cursor: "c2".to_owned(),
+        has_more: false,
+    };
+    let plaid = Arc::new(MockPlaidApi {
+        pages: Mutex::new(vec![page2]),
+        reconcile_page: Mutex::new(None),
+        sync_calls: Mutex::new(0),
+    });
+    let months = FakeMonthRepo {
+        months: vec![month_row(h.user_id, 2026, 6)],
+    };
+    let engine2 = SeaOrmPlaidSyncEngine::new(
+        plaid,
+        Arc::<FakeTxnRepo>::clone(&h.txns),
+        Arc::new(months),
+        Arc::new(FakePlaidItemRepo::default()),
+        Arc::new(FakeUowProvider),
+    );
+    let summary = engine2
+        .sync_item(item, h.user_id, "tok", date(2026, 6, 1), date(2026, 6, 8))
+        .await
+        .unwrap();
+    assert_eq!(summary.removed, 1);
+
+    let rows = h.txns.rows.lock().unwrap();
+    // The real row is gone.
+    assert!(
+        rows.iter()
+            .all(|t| t.plaid_transaction_id.as_deref() != Some("real-1")),
+        "the removed real charge is deleted"
+    );
+    // The placeholder survives AND is restored (link cleared).
+    let placeholder = rows.iter().find(|t| t.id == placeholder_id).unwrap();
+    assert_eq!(
+        placeholder.matched_transaction_id, None,
+        "the reverse path clears the stored link"
+    );
+    assert!(
+        !placeholder.is_matched_placeholder(),
+        "the placeholder reserves budget again after un-match"
     );
 }

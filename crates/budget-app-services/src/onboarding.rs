@@ -429,6 +429,7 @@ fn build_opening_transactions(
             income_kind: None,
             is_rollover: false,
             is_fund_draw: false,
+            matched_transaction_id: None,
             created_at: now,
             updated_at: now,
         });
@@ -453,6 +454,7 @@ fn build_opening_transactions(
             income_kind: None,
             is_rollover: false,
             is_fund_draw: false,
+            matched_transaction_id: None,
             created_at: now,
             updated_at: now,
         });

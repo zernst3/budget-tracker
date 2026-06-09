@@ -259,6 +259,23 @@ pub trait TransactionRepository: Send + Sync {
         month_id: MonthId,
     ) -> Result<Vec<Transaction>, RepositoryError>;
 
+    /// The `expected` placeholder matched to a given real transaction, if any —
+    /// the reverse-path lookup for un-match (`BUDGET-SETTLE-ON-MATCH-1`).
+    ///
+    /// Returns the single placeholder whose `matched_transaction_id` equals
+    /// `real_transaction_id` (a real charge matches at most one placeholder). When
+    /// the matched real transaction is removed (Plaid `removed`), the engine reads
+    /// this to find the placeholder to restore, then clears the link. Backed by
+    /// the partial index `ix_transactions_matched_transaction_id` (migration
+    /// m0003).
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure.
+    async fn find_expected_matched_to(
+        &self,
+        real_transaction_id: TransactionId,
+    ) -> Result<Option<Transaction>, RepositoryError>;
+
     /// Per-category spent totals for a month, aggregated in a single SQL query
     /// (`REPO-9` / `RUST-SEAORM-PROJECTION-TYPES-1`; `DB-NPLUSONE-1`).
     ///
@@ -368,6 +385,22 @@ pub trait FundRepository: Send + Sync {
     async fn find_obligation_for_transaction(
         &self,
         transaction_id: TransactionId,
+    ) -> Result<Option<RepaymentObligation>, RepositoryError>;
+
+    /// Find the ACTIVE deficit-financing obligation whose `origin_month_id` is
+    /// `month_id`, if any (`SPEC §12` D9, `BUDGET-DEFICIT-FINANCING-1`).
+    ///
+    /// At most one active `source = 'deficit'` obligation exists per origin month
+    /// (a month's deficit is financed at most once). The month-lifecycle rollover
+    /// path consumes this to suppress rolling the financed deficit forward in full
+    /// (the installments carry it instead); backed by
+    /// `ix_repayment_obligations_origin_month_id`.
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure.
+    async fn find_active_deficit_obligation_for_month(
+        &self,
+        month_id: MonthId,
     ) -> Result<Option<RepaymentObligation>, RepositoryError>;
 
     /// The set of transaction ids that are buffer-financed full-price purchases —

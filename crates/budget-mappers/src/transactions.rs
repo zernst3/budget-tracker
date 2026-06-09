@@ -98,6 +98,7 @@ fn build_transaction(m: transactions::Model, amount: Money) -> Transaction {
         income_kind: m.income_kind.map(income_kind_to_domain),
         is_rollover: m.is_rollover,
         is_fund_draw: m.is_fund_draw,
+        matched_transaction_id: m.matched_transaction_id.map(TransactionId::new),
         created_at: m.created_at.with_timezone(&Utc),
         updated_at: m.updated_at.with_timezone(&Utc),
     }
@@ -230,6 +231,8 @@ pub fn plaid_dto_to_domain(
         income_kind: None,
         is_rollover: false,
         is_fund_draw: false,
+        // A freshly-ingested Plaid row is never a matched placeholder.
+        matched_transaction_id: None,
         created_at: now,
         updated_at: now,
     })
@@ -256,6 +259,7 @@ pub fn domain_to_active_model(v: &Transaction) -> transactions::ActiveModel {
         income_kind: Set(v.income_kind.map(income_kind_to_entity)),
         is_rollover: Set(v.is_rollover),
         is_fund_draw: Set(v.is_fund_draw),
+        matched_transaction_id: Set(v.matched_transaction_id.map(|id| id.value())),
         created_at: Set(v.created_at.into()),
         updated_at: Set(v.updated_at.into()),
     }
@@ -285,6 +289,7 @@ mod tests {
             income_kind: None,
             is_rollover: false,
             is_fund_draw: false,
+            matched_transaction_id: None,
             created_at: now.into(),
             updated_at: now.into(),
         }
@@ -355,6 +360,43 @@ mod tests {
             sea_orm::ActiveValue::Set(true),
             "is_fund_draw preserved on write"
         );
+    }
+
+    #[test]
+    fn matched_transaction_id_round_trips_both_directions() {
+        // BUDGET-SETTLE-ON-MATCH-1: the match link must survive read AND write so
+        // the placeholder/real pair stays linked durably.
+        let real_id = Uuid::new_v4();
+        let mut m = sample_model(Decimal::new(-80000, 2)); // -$800 placeholder
+        m.status = transactions::TransactionStatus::Expected;
+        m.source = transactions::TransactionSource::Manual;
+        m.matched_transaction_id = Some(real_id);
+        let domain = model_to_domain(m).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            domain.matched_transaction_id,
+            Some(TransactionId::new(real_id)),
+            "matched_transaction_id preserved on read"
+        );
+        assert!(
+            domain.is_matched_placeholder(),
+            "an expected row with a link is a matched placeholder"
+        );
+
+        let active = domain_to_active_model(&domain);
+        assert_eq!(
+            active.matched_transaction_id,
+            sea_orm::ActiveValue::Set(Some(real_id)),
+            "matched_transaction_id preserved on write"
+        );
+    }
+
+    #[test]
+    fn unmatched_rows_carry_no_link() {
+        // A settled/plaid row never carries a match link.
+        let m = sample_model(Decimal::new(-1250, 2));
+        let domain = model_to_domain(m).unwrap_or_else(|_| unreachable!());
+        assert_eq!(domain.matched_transaction_id, None);
+        assert!(!domain.is_matched_placeholder());
     }
 
     #[test]

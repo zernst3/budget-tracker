@@ -2,7 +2,12 @@
 //!         ↔ `budget-domain::repayment_obligation::RepaymentObligation`.
 //!
 //! Conversions:
-//!   - `id / user_id / fund_id / transaction_id`: `Uuid` → typed IDs (`DOMAIN-2`)
+//!   - `id / user_id / fund_id`: `Uuid` → typed IDs (`DOMAIN-2`)
+//!   - `source`: entity `ObligationSource` → domain `ObligationSource` (D9, 1:1)
+//!   - `transaction_id`: `Option<Uuid>` → `Option<TransactionId>` (NULL for a
+//!     financed deficit, D9)
+//!   - `origin_month_id`: `Option<Uuid>` → `Option<MonthId>` (the financed
+//!     deficit's closed month, D9)
 //!   - `total_amount / remaining_amount / installment_amount`: entity `Decimal` → `Money` (`BUDGET-MONEY-1`)
 //!   - `status`: entity `ObligationStatus` → domain `ObligationStatus` (1:1)
 //!   - `created_at`: `DateTimeWithTimeZone` → `DateTime<Utc>` (`DOMAIN-7`)
@@ -12,8 +17,8 @@
 use chrono::Utc;
 use sea_orm::ActiveValue::Set;
 
-use budget_domain::enums::ObligationStatus;
-use budget_domain::ids::{FundId, RepaymentObligationId, TransactionId, UserId};
+use budget_domain::enums::{ObligationSource, ObligationStatus};
+use budget_domain::ids::{FundId, MonthId, RepaymentObligationId, TransactionId, UserId};
 use budget_domain::money::Money;
 use budget_domain::repayment_obligation::RepaymentObligation;
 
@@ -32,6 +37,20 @@ fn status_to_entity(d: ObligationStatus) -> repayment_obligations::ObligationSta
     match d {
         ObligationStatus::Active => repayment_obligations::ObligationStatus::Active,
         ObligationStatus::Paid => repayment_obligations::ObligationStatus::Paid,
+    }
+}
+
+fn source_to_domain(e: repayment_obligations::ObligationSource) -> ObligationSource {
+    match e {
+        repayment_obligations::ObligationSource::LargePurchase => ObligationSource::LargePurchase,
+        repayment_obligations::ObligationSource::Deficit => ObligationSource::Deficit,
+    }
+}
+
+fn source_to_entity(d: ObligationSource) -> repayment_obligations::ObligationSource {
+    match d {
+        ObligationSource::LargePurchase => repayment_obligations::ObligationSource::LargePurchase,
+        ObligationSource::Deficit => repayment_obligations::ObligationSource::Deficit,
     }
 }
 
@@ -56,7 +75,9 @@ pub fn model_to_domain(
         id: RepaymentObligationId::new(m.id),
         user_id: UserId::new(m.user_id),
         fund_id: FundId::new(m.fund_id),
-        transaction_id: TransactionId::new(m.transaction_id),
+        source: source_to_domain(m.source),
+        transaction_id: m.transaction_id.map(TransactionId::new),
+        origin_month_id: m.origin_month_id.map(MonthId::new),
         total_amount: Money::from_decimal(m.total_amount),
         remaining_amount: Money::from_decimal(m.remaining_amount),
         installment_amount: Money::from_decimal(m.installment_amount),
@@ -74,7 +95,9 @@ pub fn domain_to_active_model(v: &RepaymentObligation) -> repayment_obligations:
         id: Set(v.id.value()),
         user_id: Set(v.user_id.value()),
         fund_id: Set(v.fund_id.value()),
-        transaction_id: Set(v.transaction_id.value()),
+        source: Set(source_to_entity(v.source)),
+        transaction_id: Set(v.transaction_id.map(|id| id.value())),
+        origin_month_id: Set(v.origin_month_id.map(|id| id.value())),
         total_amount: Set(v.total_amount.as_decimal()),
         remaining_amount: Set(v.remaining_amount.as_decimal()),
         installment_amount: Set(v.installment_amount.as_decimal()),
@@ -96,7 +119,9 @@ mod tests {
             id: Uuid::new_v4(),
             user_id: Uuid::new_v4(),
             fund_id: Uuid::new_v4(),
-            transaction_id: Uuid::new_v4(),
+            source: repayment_obligations::ObligationSource::LargePurchase,
+            transaction_id: Some(Uuid::new_v4()),
+            origin_month_id: None,
             total_amount: Decimal::new(200_000, 2), // $2000.00 MacBook
             remaining_amount: Decimal::new(150_000, 2), // $1500.00 still owed
             installment_amount: Decimal::new(50000, 2), // $500.00/month
@@ -153,6 +178,51 @@ mod tests {
         let expected_txn = m.transaction_id;
         let domain = model_to_domain(m).unwrap_or_else(|_| unreachable!());
         assert_eq!(domain.fund_id.value(), expected_fund);
-        assert_eq!(domain.transaction_id.value(), expected_txn);
+        assert_eq!(domain.transaction_id.map(|t| t.value()), expected_txn);
+    }
+
+    #[test]
+    fn large_purchase_source_round_trips() {
+        let m = sample_model();
+        let domain = model_to_domain(m).unwrap_or_else(|_| unreachable!());
+        assert_eq!(domain.source, ObligationSource::LargePurchase);
+        assert!(domain.transaction_id.is_some());
+        assert!(domain.origin_month_id.is_none());
+        let am = domain_to_active_model(&domain);
+        assert_eq!(
+            am.source,
+            Set(repayment_obligations::ObligationSource::LargePurchase)
+        );
+    }
+
+    #[test]
+    fn deficit_source_round_trips_with_null_transaction_and_origin_month_set() {
+        // D9: a financed deficit has source='deficit', transaction_id NULL, and
+        // origin_month_id set to the closed month whose deficit was financed.
+        let mut m = sample_model();
+        let origin_month = Uuid::new_v4();
+        m.source = repayment_obligations::ObligationSource::Deficit;
+        m.transaction_id = None;
+        m.origin_month_id = Some(origin_month);
+
+        let domain = model_to_domain(m).unwrap_or_else(|_| unreachable!());
+        assert_eq!(domain.source, ObligationSource::Deficit);
+        assert!(
+            domain.transaction_id.is_none(),
+            "a financed deficit has no single source transaction (D9)"
+        );
+        assert_eq!(
+            domain.origin_month_id.map(|mid| mid.value()),
+            Some(origin_month)
+        );
+
+        // Write path preserves the NULL transaction_id + the set origin_month_id.
+        let am = domain_to_active_model(&domain);
+        assert_eq!(
+            am.source,
+            Set(repayment_obligations::ObligationSource::Deficit)
+        );
+        assert_eq!(am.transaction_id, Set(None));
+        assert_eq!(am.origin_month_id, Set(Some(origin_month)));
     }
 }

@@ -148,6 +148,7 @@ fn sample_txn_model(
         income_kind: None,
         is_rollover,
         is_fund_draw: false,
+        matched_transaction_id: None,
         created_at: now_fixed().into(),
         updated_at: now_fixed().into(),
     }
@@ -825,6 +826,56 @@ mod transaction_repo {
             .expect("no error");
         let txn = result.expect("row present");
         assert_eq!(txn.plaid_transaction_id.as_deref(), Some("plaid-abc"));
+    }
+
+    // --- find_expected_matched_to (reverse-path lookup, SETTLE-ON-MATCH) -----
+
+    #[tokio::test]
+    async fn find_expected_matched_to_returns_linked_placeholder() {
+        // BUDGET-SETTLE-ON-MATCH-1: the placeholder whose matched_transaction_id ==
+        // the real txn id is returned, with the link mapped through.
+        let real_id = Uuid::new_v4();
+        let mut placeholder = sample_txn_model(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Some(Uuid::new_v4()),
+            Decimal::new(-80000, 2),
+            transactions::TransactionStatus::Expected,
+            false,
+        );
+        placeholder.matched_transaction_id = Some(real_id);
+        let db = MockDatabase::new(DbBackend::Postgres)
+            .append_query_results([[placeholder]])
+            .into_connection();
+        let repo = PostgresTransactionRepository::new(db);
+        let result = repo
+            .find_expected_matched_to(TransactionId::new(real_id))
+            .await
+            .expect("no error");
+        let txn = result.expect("placeholder present");
+        assert_eq!(
+            txn.matched_transaction_id,
+            Some(TransactionId::new(real_id)),
+            "the link must map through to the domain type"
+        );
+        assert!(
+            txn.is_matched_placeholder(),
+            "the linked expected row is a matched placeholder"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_expected_matched_to_returns_none_when_unmatched() {
+        let db = MockDatabase::new(DbBackend::Postgres)
+            .append_query_results([Vec::<transactions::Model>::new()])
+            .into_connection();
+        let repo = PostgresTransactionRepository::new(db);
+        let result = repo
+            .find_expected_matched_to(TransactionId::generate())
+            .await
+            .expect("no error");
+        assert!(result.is_none(), "no matched placeholder -> None");
     }
 
     // --- category_spent_for_month (raw SQL aggregate, REPO-9) ---------------

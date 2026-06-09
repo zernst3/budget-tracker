@@ -99,6 +99,15 @@ pub struct Model {
     /// A). The money was already expensed at contribution time; the draw is excluded
     /// from the month expense-remaining sum.
     pub is_fund_draw: bool,
+    /// The real transaction that settled this `expected` placeholder
+    /// (`SPEC §4.10` / `§12`, `BUDGET-SETTLE-ON-MATCH-1`). Set ONLY on an
+    /// `expected` placeholder row; NULL on every other row. Self-referential FK
+    /// → `transactions(id)` with `ON DELETE SET NULL` (migration m0003): deleting
+    /// the matched real txn clears the link (restoring the placeholder) rather
+    /// than cascading the placeholder away. A matched placeholder is excluded
+    /// from budget math so the placeholder/real pair counts exactly once
+    /// (`BUDGET-NO-DOUBLE-CHARGE-1`).
+    pub matched_transaction_id: Option<Uuid>,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
 }
@@ -139,6 +148,18 @@ pub enum Relation {
     Account,
     #[sea_orm(has_many = "super::repayment_obligations::Entity")]
     RepaymentObligations,
+    /// Self-referential link: the real transaction that settled this `expected`
+    /// placeholder (`BUDGET-SETTLE-ON-MATCH-1`, migration m0003). `ON DELETE SET
+    /// NULL` so deleting the matched real txn clears the link (the placeholder is
+    /// restored), never cascading the placeholder away.
+    #[sea_orm(
+        belongs_to = "Entity",
+        from = "Column::MatchedTransactionId",
+        to = "Column::Id",
+        on_update = "NoAction",
+        on_delete = "SetNull"
+    )]
+    MatchedTransaction,
 }
 
 impl Related<super::users::Entity> for Entity {

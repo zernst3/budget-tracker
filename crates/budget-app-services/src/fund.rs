@@ -50,7 +50,9 @@ use std::sync::Arc;
 use chrono::{DateTime, NaiveDate, Utc};
 
 use budget_domain::category::Category;
-use budget_domain::enums::{FundKind, ObligationStatus, TransactionSource, TransactionStatus};
+use budget_domain::enums::{
+    FundKind, ObligationSource, ObligationStatus, TransactionSource, TransactionStatus,
+};
 use budget_domain::error::DomainError;
 use budget_domain::fund::Fund;
 use budget_domain::ids::{
@@ -185,6 +187,7 @@ impl FundService {
             income_kind: None,
             is_rollover: false,
             is_fund_draw: false,
+            matched_transaction_id: None,
             created_at: now,
             updated_at: now,
         };
@@ -416,7 +419,11 @@ impl FundService {
             id: RepaymentObligationId::generate(),
             user_id,
             fund_id,
-            transaction_id: txn_id,
+            // D7: a buffer-financed purchase. The single source transaction is the
+            // full-price tracking row; no origin month (that is the deficit path, D9).
+            source: ObligationSource::LargePurchase,
+            transaction_id: Some(txn_id),
+            origin_month_id: None,
             total_amount: price,
             remaining_amount: price,
             installment_amount: installment,
@@ -516,6 +523,7 @@ impl FundService {
             income_kind: None,
             is_rollover: false,
             is_fund_draw: false,
+            matched_transaction_id: None,
             created_at: now,
             updated_at: now,
         };
@@ -605,6 +613,7 @@ impl FundService {
             income_kind: None,
             is_rollover: false,
             is_fund_draw: false,
+            matched_transaction_id: None,
             created_at: now,
             updated_at: now,
         };
@@ -820,6 +829,7 @@ fn purchase_txn(
         income_kind: None,
         is_rollover: false,
         is_fund_draw,
+        matched_transaction_id: None,
         created_at: now,
         updated_at: now,
     }

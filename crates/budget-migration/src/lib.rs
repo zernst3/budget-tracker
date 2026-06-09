@@ -42,6 +42,8 @@ pub use sea_orm_migration::prelude::*;
 
 mod m0001_genesis_schema;
 mod m0002_auth_schema;
+mod m0003_transaction_match_link;
+mod m0004_deficit_financing;
 
 /// The ordered migration list run by the server at startup.
 ///
@@ -55,6 +57,8 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m0001_genesis_schema::Migration),
             Box::new(m0002_auth_schema::Migration),
+            Box::new(m0003_transaction_match_link::Migration),
+            Box::new(m0004_deficit_financing::Migration),
         ]
     }
 }
@@ -63,9 +67,9 @@ impl MigratorTrait for Migrator {
 mod tests {
     use super::{Migrator, MigratorTrait};
 
-    /// The Migrator exposes exactly the genesis migration (so far) and every
-    /// migration name is unique — the journal keys off the name, so a duplicate
-    /// would silently skip a real migration (`PROC-CI-MIGRATION-HYGIENE-1`).
+    /// Every migration name in the Migrator is unique — the journal keys off the
+    /// name, so a duplicate would silently skip a real migration
+    /// (`PROC-CI-MIGRATION-HYGIENE-1`).
     #[test]
     fn migration_names_are_unique_and_nonempty() {
         let migrations = Migrator::migrations();

@@ -17,12 +17,13 @@
 //!      here. If the settled row references a now-superseded pending row via
 //!      `pending_transaction_id`, the pending row is removed so the same charge
 //!      isn't counted twice.
-//!    - **removed**: delete the row. Deleting a settled row dated to a fixed
-//!      category automatically reverses that category's settlement, because
-//!      settlement is predicate-based (`fixed_category_spent`,
-//!      `BUDGET-SETTLE-ON-MATCH-1`) — once no settled rows remain the placeholder
-//!      stands back in. No stored match-link exists to un-do (see the build
-//!      report's ROUTE-1 note on expected-expense un-match).
+//!    - **removed**: delete the row, reversing any settlement/match it had driven
+//!      (`BUDGET-SETTLE-ON-MATCH-1`). A fixed-category settlement reverses
+//!      automatically (predicate-based `fixed_category_spent` — once no settled
+//!      rows remain the placeholder stands back in). An expected-expense match is
+//!      reversed EXPLICITLY: if a placeholder was matched to the removed real txn
+//!      (stored `matched_transaction_id`, m0003), the placeholder is restored and
+//!      the link cleared before the row is deleted, in the same unit of work.
 //!    - persist the cursor.
 //! 3. After the cursor loop, run the rolling 30-day reconcile, clamped to
 //!    `max(today - 30d, tracking_start_date)` (`SPEC §6`, `BUDGET-CUTOVER-1`).
@@ -265,8 +266,19 @@ impl SyncApplier {
         Ok(())
     }
 
-    /// Apply one Plaid `removed` id (delete; settlement reverses via the
-    /// predicate, `BUDGET-SETTLE-ON-MATCH-1`). Idempotent: a re-removed id no-ops.
+    /// Apply one Plaid `removed` id (delete; reverse any settlement/match it had
+    /// driven, `BUDGET-SETTLE-ON-MATCH-1`). Idempotent: a re-removed id no-ops.
+    ///
+    /// Two reversals, in one unit of work with the delete:
+    ///   1. **Fixed-category settlement** reverses automatically via the predicate
+    ///      (`fixed_category_spent = settled ? sum(rows) : placeholder`,
+    ///      `BUDGET-NO-DOUBLE-CHARGE-1`): once no settled rows remain in the
+    ///      category, its placeholder stands back in. Nothing to undo explicitly.
+    ///   2. **Expected-expense match** is an EXPLICIT stored link
+    ///      (`matched_transaction_id`): if a placeholder was matched to the removed
+    ///      real txn, restore it by clearing the link BEFORE deleting the real row,
+    ///      so the placeholder reserves budget again. Without this, a
+    ///      removed-after-match charge could not be un-matched.
     async fn apply_removed(
         &self,
         plaid_transaction_id: &str,
@@ -279,12 +291,36 @@ impl SyncApplier {
         else {
             return Ok(false);
         };
-        // Deleting the row reverses any predicate-based settlement it had caused:
-        // a fixed category's spent = settled ? sum(rows) : placeholder
-        // (BUDGET-NO-DOUBLE-CHARGE-1 / BUDGET-SETTLE-ON-MATCH-1). Once no settled
-        // rows remain, the placeholder stands back in automatically.
+        // Reverse an expected-expense match first (BUDGET-SETTLE-ON-MATCH-1):
+        // restore the placeholder linked to this real txn and clear the link, so
+        // the placeholder counts again. Done in the same uow as the delete.
+        self.restore_matched_placeholder(existing.id, uow).await?;
+        // Deleting the row reverses any predicate-based fixed-category settlement
+        // automatically (BUDGET-NO-DOUBLE-CHARGE-1 / BUDGET-SETTLE-ON-MATCH-1).
         self.transactions.delete(existing.id, Some(uow)).await?;
         Ok(true)
+    }
+
+    /// If an `expected` placeholder is matched to `real_transaction_id`, restore it
+    /// (clear `matched_transaction_id`) so it reserves budget again
+    /// (`BUDGET-SETTLE-ON-MATCH-1`). A no-op when nothing is matched to it. Reads
+    /// the stored link rather than re-deriving it, and writes in the caller's uow.
+    async fn restore_matched_placeholder(
+        &self,
+        real_transaction_id: TransactionId,
+        uow: &dyn UnitOfWork,
+    ) -> Result<(), PlaidError> {
+        let Some(mut placeholder) = self
+            .transactions
+            .find_expected_matched_to(real_transaction_id)
+            .await?
+        else {
+            return Ok(());
+        };
+        placeholder.matched_transaction_id = None;
+        placeholder.updated_at = Utc::now();
+        self.transactions.save(&placeholder, Some(uow)).await?;
+        Ok(())
     }
 }
 

@@ -79,8 +79,8 @@ use budget_app_services::{
 use budget_domain::budget::Budget;
 use budget_domain::category::Category;
 use budget_domain::enums::{
-    Cadence, CategoryGrp, FundKind, IncomeKind, ObligationStatus, TransactionSource,
-    TransactionStatus,
+    Cadence, CategoryGrp, FundKind, IncomeKind, ObligationSource, ObligationStatus,
+    TransactionSource, TransactionStatus,
 };
 use budget_domain::fund::Fund;
 use budget_domain::ids::{
@@ -367,6 +367,16 @@ impl TransactionRepository for MemTxnRepo {
             .collect())
     }
 
+    async fn find_expected_matched_to(
+        &self,
+        real_transaction_id: TransactionId,
+    ) -> Result<Option<Transaction>, RepositoryError> {
+        let g = self.txns.lock().map_err(poisoned)?;
+        Ok(g.iter()
+            .find(|t| t.matched_transaction_id == Some(real_transaction_id))
+            .cloned())
+    }
+
     async fn category_spent_for_month(
         &self,
         _month_id: MonthId,
@@ -508,7 +518,24 @@ impl FundRepository for MemFundRepo {
             .lock()
             .map_err(poisoned)?
             .iter()
-            .find(|o| o.transaction_id == transaction_id)
+            .find(|o| o.transaction_id == Some(transaction_id))
+            .cloned())
+    }
+
+    async fn find_active_deficit_obligation_for_month(
+        &self,
+        month_id: MonthId,
+    ) -> Result<Option<RepaymentObligation>, RepositoryError> {
+        Ok(self
+            .obligations
+            .lock()
+            .map_err(poisoned)?
+            .iter()
+            .find(|o| {
+                o.origin_month_id == Some(month_id)
+                    && o.source == ObligationSource::Deficit
+                    && o.status == ObligationStatus::Active
+            })
             .cloned())
     }
 
@@ -516,15 +543,16 @@ impl FundRepository for MemFundRepo {
         &self,
         user_id: UserId,
     ) -> Result<Vec<TransactionId>, RepositoryError> {
-        // EVERY obligation's tracking txn, active OR paid (D7: the full price stays
-        // excluded forever because the cash was buffer-fronted).
+        // EVERY large-purchase obligation's tracking txn, active OR paid (D7: the
+        // full price stays excluded forever because the cash was buffer-fronted).
+        // Deficit obligations have no tracking txn (transaction_id == None, D9).
         Ok(self
             .obligations
             .lock()
             .map_err(poisoned)?
             .iter()
             .filter(|o| o.user_id == user_id)
-            .map(|o| o.transaction_id)
+            .filter_map(|o| o.transaction_id)
             .collect())
     }
 
@@ -778,6 +806,7 @@ fn expense_txn(h: &Harness, month_id: MonthId, category: CategoryId, amount: Mon
         income_kind: None,
         is_rollover: false,
         is_fund_draw: false,
+        matched_transaction_id: None,
         created_at: now_ts(),
         updated_at: now_ts(),
     }
@@ -1937,4 +1966,242 @@ async fn mixed_month_nets_income_expense_and_contribution() {
     let oracle = oracle_month_net(&jan_txns, &[fund_cat], &[], Decimal::new(400_000, 2));
     assert_eq!(oracle, Decimal::new(-18_000, 2));
     assert_eq!(h.rollover_of(2026, 2).await.as_decimal(), oracle);
+}
+
+// ===========================================================================
+// BUDGET-BUFFER-UNTRACKED-1 — regression: buffer balance never touches budget
+// math; savings-fund contribution reduces rolling Other exactly once (D6).
+// ===========================================================================
+
+/// `BUDGET-BUFFER-UNTRACKED-1`: a non-zero buffer balance stored on the fund
+/// row has **zero** effect on free-to-spend / month net-leftover.
+///
+/// Setup: Jan has income that exactly matches the expectation and no expenses.
+/// The buffer fund has a large pre-seeded balance ($15 000) set directly on the
+/// fund row — simulating the onboarding opening balance (`SPEC §9`, D6 Model A:
+/// the opening figure is a pre-genesis fact, not also posted as a contribution).
+/// No contribution transaction is posted into Jan, so the only "budget" activity
+/// is income vs. expectation (breakeven). The Feb rollover must be $0 — the
+/// buffer balance plays no part in the net.
+///
+/// Cross-check: a CONTROL month (identical income, NO buffer fund at all) rolls
+/// over the identical $0. If the buffer balance were leaking into budget math
+/// (e.g. subtracted from free-to-spend like a tracked savings balance) the two
+/// would diverge; they must not.
+#[tokio::test]
+async fn buffer_balance_does_not_affect_free_to_spend_or_net_leftover() {
+    // --- Case A: buffer fund with a $15 000 balance, no contribution txn posted ---
+    let h = harness_with_expected(Money::from_major(4_000));
+    // Pre-seed the buffer with a $15 000 opening balance (the pre-genesis fact).
+    h.push_buffer(Money::from_major(15_000), Money::from_major(15_000));
+
+    let jan = h
+        .lifecycle
+        .ensure_current_month(h.user_id, ny_noon(2026, 1, 8))
+        .await
+        .expect("init jan");
+
+    // Income exactly meets the $4 000 expectation: (actual - expected) = 0.
+    let mut income = expense_txn(
+        &h,
+        jan.id,
+        h.budgets
+            .categories
+            .lock()
+            .unwrap()
+            .first()
+            .expect("rollover cat")
+            .id,
+        Money::from_major(4_000),
+    );
+    income.category_id = None;
+    income.income_kind = Some(IncomeKind::Budgeted);
+    h.txns.push(income);
+
+    // No expenses, no contributions — income break-even, buffer balance ignored.
+    h.lifecycle
+        .ensure_current_month(h.user_id, ny_noon(2026, 2, 8))
+        .await
+        .expect("init feb");
+
+    // The Feb rollover (= Jan net) must be $0 regardless of the buffer balance.
+    let rollover_with_buffer = h.rollover_of(2026, 2).await;
+    assert_eq!(
+        rollover_with_buffer,
+        Money::ZERO,
+        "BUDGET-BUFFER-UNTRACKED-1: a $15 000 buffer balance must NOT affect the \
+         free-to-spend / month net-leftover (breakeven month rolls over $0)"
+    );
+
+    // Independent oracle: the oracle sees the income txn and zero expenses ->
+    // net = 0. Cross-checks the assertion above is not vacuously trivial.
+    let jan_txns = h.txns.list_for_month(jan.id).await.unwrap();
+    let oracle = oracle_month_net(&jan_txns, &[], &[], Decimal::new(400_000, 2));
+    assert_eq!(
+        rollover_with_buffer.as_decimal(),
+        oracle,
+        "production net matches the independent oracle for the buffer-balance case"
+    );
+
+    // --- Case B: control — NO buffer fund; same income, same expectation ---
+    let h2 = harness_with_expected(Money::from_major(4_000));
+
+    let jan2 = h2
+        .lifecycle
+        .ensure_current_month(h2.user_id, ny_noon(2026, 1, 8))
+        .await
+        .expect("init jan2");
+
+    let mut income2 = expense_txn(
+        &h2,
+        jan2.id,
+        h2.budgets
+            .categories
+            .lock()
+            .unwrap()
+            .first()
+            .expect("rollover cat")
+            .id,
+        Money::from_major(4_000),
+    );
+    income2.category_id = None;
+    income2.income_kind = Some(IncomeKind::Budgeted);
+    h2.txns.push(income2);
+
+    h2.lifecycle
+        .ensure_current_month(h2.user_id, ny_noon(2026, 2, 8))
+        .await
+        .expect("init feb2");
+
+    let rollover_no_buffer = h2.rollover_of(2026, 2).await;
+
+    // Both cases must produce the same rollover — the buffer's presence or its
+    // balance must not shift the net at all.
+    assert_eq!(
+        rollover_with_buffer, rollover_no_buffer,
+        "BUDGET-BUFFER-UNTRACKED-1 control: month net is identical whether the \
+         buffer fund exists or not — the buffer balance is an untracked external \
+         pool with no bearing on budget math"
+    );
+}
+
+/// `BUDGET-FUND-EARMARK-1` + `BUDGET-BUFFER-UNTRACKED-1` combined: a savings-fund
+/// (surplus / `compulsory_repayment = false`) contribution reduces rolling Other
+/// by EXACTLY the contribution amount and ONLY ONCE — via the posted Other-bucket
+/// expense, not also via a fund-balance subtraction.
+///
+/// Proves the critical "no double-count" invariant:
+///   - the contribution transaction bites once (rolling Other = −contribution), and
+///   - the fund balance is NOT additionally subtracted from free-to-spend (the
+///     conservation identity `rolling_Other + fund_balance == 0` confirms exactly
+///     one count).
+///
+/// Also confirms parity with a control (ordinary expense of the same size): a
+/// savings-fund contribution is treated identically to a plain expense in budget
+/// math — the rolling Other is reduced by the same amount in both cases.
+#[tokio::test]
+async fn savings_fund_contribution_reduces_rolling_other_exactly_once() {
+    // Zero expected income keeps the D5 formula clean: net = Σ(expense remaining).
+    let h = harness_zero_expected();
+    let fund_cat = h.add_fund_category(12, Money::from_major(1_200));
+    let fund_id = h.push_surplus(Money::ZERO); // savings / surplus fund
+
+    let jan = h
+        .lifecycle
+        .ensure_current_month(h.user_id, ny_noon(2026, 1, 8))
+        .await
+        .expect("init jan");
+
+    // The only money movement in Jan: a $300 contribution INTO the savings fund.
+    let contribution = Money::from_major(300);
+    h.fund_service
+        .contribute(
+            fund_id,
+            jan.id,
+            fund_cat,
+            contribution,
+            ymd(2026, 1, 9),
+            now_ts(),
+        )
+        .await
+        .expect("contribute");
+
+    h.lifecycle
+        .ensure_current_month(h.user_id, ny_noon(2026, 2, 8))
+        .await
+        .expect("init feb");
+
+    let rollover = h.rollover_of(2026, 2).await;
+    let fund_balance = h.fund_balance(fund_id).await;
+
+    // The contribution counts exactly once via the Other-bucket expense: the
+    // rolling Other is −$300 (not $0, not −$600).
+    assert_eq!(
+        rollover, -contribution,
+        "BUDGET-FUND-EARMARK-1: a $300 savings-fund contribution must reduce rolling \
+         Other by exactly $300 (contribution counted once, via the Other expense)"
+    );
+
+    // The fund balance is +$300: the earmarked dollars are tracked in the fund.
+    assert_eq!(
+        fund_balance, contribution,
+        "savings-fund balance must be +$300 after the contribution"
+    );
+
+    // Conservation: (rolling Other) + (fund balance) == 0 — total system money
+    // is invariant; the $300 was counted exactly once across both ledgers.
+    assert_eq!(
+        rollover + fund_balance,
+        Money::ZERO,
+        "BUDGET-BUFFER-UNTRACKED-1 / BUDGET-FUND-EARMARK-1 conservation: \
+         (rolling Other) + (fund balance) must sum to $0 — the $300 counted once"
+    );
+
+    // Independent oracle cross-check: the oracle counts every non-income,
+    // non-fund-draw transaction — including the contribution.
+    let jan_txns = h.txns.list_for_month(jan.id).await.unwrap();
+    let oracle = oracle_month_net(&jan_txns, &[fund_cat], &[], Decimal::ZERO);
+    assert_eq!(
+        rollover.as_decimal(),
+        oracle,
+        "production net matches the independent oracle (contribution counted once)"
+    );
+    assert_eq!(
+        oracle,
+        -contribution.as_decimal(),
+        "oracle also says net = −contribution (single-count)"
+    );
+
+    // Control: an ordinary expense of the SAME size ALSO reduces rolling Other by
+    // $300. A savings-fund contribution behaves identically to a plain expense in
+    // budget math — the rolling Other is reduced by the same amount in both cases.
+    // This confirms parity and rules out any special-casing that might accidentally
+    // NOT reduce Other for fund contributions.
+    let h2 = harness_zero_expected();
+    let exp_cat = h2.add_expense_category();
+
+    let jan2 = h2
+        .lifecycle
+        .ensure_current_month(h2.user_id, ny_noon(2026, 1, 8))
+        .await
+        .expect("init jan2");
+
+    h2.txns.push(expense_txn(
+        &h2,
+        jan2.id,
+        exp_cat,
+        -contribution, // a plain −$300 expense
+    ));
+
+    h2.lifecycle
+        .ensure_current_month(h2.user_id, ny_noon(2026, 2, 8))
+        .await
+        .expect("init feb2");
+
+    let control_rollover = h2.rollover_of(2026, 2).await;
+    assert_eq!(
+        rollover, control_rollover,
+        "savings-fund contribution reduces rolling Other identically to a plain \
+         expense of the same size (D6 Model A parity)"
+    );
 }

@@ -132,6 +132,10 @@ pub fn counts_in_month_expense_remaining(
     // exclusion plumbing carries forward.
     let _ = fund_category_ids;
     counts_in_budget(txn.status)
+        // A matched expected placeholder no longer reserves budget — the real
+        // transaction it links to counts instead, so the pair counts exactly once
+        // (BUDGET-SETTLE-ON-MATCH-1 / BUDGET-NO-DOUBLE-CHARGE-1).
+        && !txn.is_matched_placeholder()
         && !txn.is_income()
         && !txn.is_fund_draw
         && !buffer_financed_txn_ids.contains(&txn.id)
@@ -210,6 +214,7 @@ mod tests {
             income_kind: None,
             is_rollover: false,
             is_fund_draw,
+            matched_transaction_id: None,
             created_at: now,
             updated_at: now,
         }
@@ -256,5 +261,27 @@ mod tests {
         let cat = CategoryId::generate();
         let e = expense(Money::from_minor(-2_500), Some(cat), false);
         assert!(counts_in_month_expense_remaining(&e, &[], &[]));
+    }
+
+    #[test]
+    fn matched_expected_placeholder_is_excluded() {
+        // BUDGET-SETTLE-ON-MATCH-1: an expected placeholder that has been matched
+        // to a real txn no longer counts (the real txn counts instead), so the
+        // pair counts exactly once.
+        let cat = CategoryId::generate();
+        let mut placeholder = expense(Money::from_minor(-80_000), Some(cat), false);
+        placeholder.status = TransactionStatus::Expected;
+        // Unmatched: an expected placeholder reserves budget -> counts.
+        assert!(
+            counts_in_month_expense_remaining(&placeholder, &[], &[]),
+            "an unmatched expected placeholder reserves budget"
+        );
+        // Matched: drops out.
+        placeholder.matched_transaction_id = Some(crate::ids::TransactionId::generate());
+        assert!(placeholder.is_matched_placeholder());
+        assert!(
+            !counts_in_month_expense_remaining(&placeholder, &[], &[]),
+            "a matched expected placeholder is excluded (BUDGET-SETTLE-ON-MATCH-1)"
+        );
     }
 }

@@ -10,7 +10,10 @@
 //! Services land in build step 3+ (see `.build-progress.md`).
 
 pub mod auth;
+pub mod config;
+pub mod deficit_financing;
 pub mod error;
+pub mod expected_expense;
 pub mod fund;
 pub mod income;
 pub mod month_lifecycle;
@@ -18,7 +21,10 @@ pub mod onboarding;
 pub mod plaid_sync;
 
 pub use auth::AuthService;
+pub use config::DeficitFinancingConfig;
+pub use deficit_financing::{DeficitFinancingOffer, DeficitFinancingService};
 pub use error::ServiceError;
+pub use expected_expense::ExpectedExpenseService;
 pub use fund::{BufferHealth, FundService, LargePurchaseResolution};
 pub use income::{
     ConfigDrivenIncomeExpectation, FixedExpectation, IncomeExpectation, IncomeSurplusRouter,

@@ -79,8 +79,8 @@ use budget_app_services::{FundService, MonthLifecycleService, ServiceError};
 use budget_domain::budget::Budget;
 use budget_domain::category::Category;
 use budget_domain::enums::{
-    Cadence, CategoryGrp, FundKind, IncomeKind, IncomeMode, PaycheckType, SurplusRouting,
-    TransactionSource, TransactionStatus,
+    Cadence, CategoryGrp, FundKind, IncomeKind, IncomeMode, ObligationSource, ObligationStatus,
+    PaycheckType, SurplusRouting, TransactionSource, TransactionStatus,
 };
 use budget_domain::fund::Fund;
 use budget_domain::ids::{
@@ -265,7 +265,21 @@ impl FundRepository for MemFundRepo {
     ) -> Result<Option<RepaymentObligation>, RepositoryError> {
         let g = self.obligations.lock().map_err(poisoned)?;
         Ok(g.iter()
-            .find(|o| o.transaction_id == transaction_id)
+            .find(|o| o.transaction_id == Some(transaction_id))
+            .cloned())
+    }
+
+    async fn find_active_deficit_obligation_for_month(
+        &self,
+        month_id: MonthId,
+    ) -> Result<Option<RepaymentObligation>, RepositoryError> {
+        let g = self.obligations.lock().map_err(poisoned)?;
+        Ok(g.iter()
+            .find(|o| {
+                o.origin_month_id == Some(month_id)
+                    && o.source == ObligationSource::Deficit
+                    && o.status == ObligationStatus::Active
+            })
             .cloned())
     }
 
@@ -276,7 +290,7 @@ impl FundRepository for MemFundRepo {
         let g = self.obligations.lock().map_err(poisoned)?;
         Ok(g.iter()
             .filter(|o| o.user_id == user_id)
-            .map(|o| o.transaction_id)
+            .filter_map(|o| o.transaction_id)
             .collect())
     }
 
@@ -378,6 +392,16 @@ impl TransactionRepository for MemTxnRepo {
             .filter(|t| t.month_id == month_id && t.status == TransactionStatus::Expected)
             .cloned()
             .collect())
+    }
+
+    async fn find_expected_matched_to(
+        &self,
+        real_transaction_id: TransactionId,
+    ) -> Result<Option<Transaction>, RepositoryError> {
+        let g = self.txns.lock().map_err(poisoned)?;
+        Ok(g.iter()
+            .find(|t| t.matched_transaction_id == Some(real_transaction_id))
+            .cloned())
     }
 
     async fn category_spent_for_month(
@@ -737,6 +761,7 @@ fn base_txn(user_id: UserId, month_id: MonthId, amount: Money) -> Transaction {
         income_kind: None,
         is_rollover: false,
         is_fund_draw: false,
+        matched_transaction_id: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }

@@ -161,6 +161,24 @@ impl TransactionRepository for PostgresTransactionRepository {
         Self::map_txns(models)
     }
 
+    async fn find_expected_matched_to(
+        &self,
+        real_transaction_id: TransactionId,
+    ) -> Result<Option<Transaction>, RepositoryError> {
+        // The reverse-path lookup: the single expected placeholder whose
+        // matched_transaction_id == the removed real txn (BUDGET-SETTLE-ON-MATCH-1).
+        // Backed by ix_transactions_matched_transaction_id (m0003).
+        let model = transactions::Entity::find()
+            .filter(transactions::Column::MatchedTransactionId.eq(real_transaction_id.value()))
+            .one(&self.db)
+            .await
+            .map_err(map_db_err)?;
+        model
+            .map(transactions_mapper::model_to_domain)
+            .transpose()
+            .map_err(map_read)
+    }
+
     async fn category_spent_for_month(
         &self,
         month_id: MonthId,
@@ -172,11 +190,16 @@ impl TransactionRepository for PostgresTransactionRepository {
         // status IN ('settled','expected') == counts_in_budget()==true
         // (BUDGET-STATUS-DRIVES-INCLUSION-1). category_id IS NOT NULL excludes
         // uncategorized rows (they belong to no bucket).
+        // matched_transaction_id IS NULL excludes a matched expected placeholder
+        // (BUDGET-SETTLE-ON-MATCH-1): the real txn it links to counts instead, so
+        // the pair counts exactly once (BUDGET-NO-DOUBLE-CHARGE-1). Only 'expected'
+        // rows ever carry the link, so this never excludes a settled row.
         let sql = "SELECT category_id, SUM(amount) AS spent \
                    FROM transactions \
                    WHERE month_id = $1 \
                      AND category_id IS NOT NULL \
                      AND status IN ('settled', 'expected') \
+                     AND matched_transaction_id IS NULL \
                    GROUP BY category_id";
         let stmt = Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
@@ -201,10 +224,13 @@ impl TransactionRepository for PostgresTransactionRepository {
         // than NULL (the trait contract returns a zero net, never None). Same
         // inclusion polarity as category_spent_for_month
         // (BUDGET-STATUS-DRIVES-INCLUSION-1). Source: transactions (m0001).
+        // matched_transaction_id IS NULL excludes a matched expected placeholder
+        // (BUDGET-SETTLE-ON-MATCH-1) so the placeholder/real pair counts once.
         let sql = "SELECT COALESCE(SUM(amount), 0) AS net \
                    FROM transactions \
                    WHERE month_id = $1 \
-                     AND status IN ('settled', 'expected')";
+                     AND status IN ('settled', 'expected') \
+                     AND matched_transaction_id IS NULL";
         let stmt = Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
             sql,
