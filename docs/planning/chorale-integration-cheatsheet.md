@@ -221,33 +221,37 @@ Result<(),String>)`. `Err(msg)` shows inline and keeps the editor open.
 > (L447-465: matches `edit.column_id`, mutates, `update_row`) and the
 > `name` column conditionally getting `.editor(EditorKind::Text)` (L243-244).
 
-### ⚠ GOTCHA — there is NO native `<select>` / dropdown editor in v0.2.0
+### Native `<select>` dropdown editor — `EditorKind::Select { options }`
 
-The budget spec wants the **category** editor to be a select/dropdown. chorale
-v0.2.0 does **not** provide one. `editor_td` (`components.rs:2591`) renders an
-`<input>` for every `EditorKind`, and its `input_type` match falls through to
-`"text"` for both `Text` and `Custom` (`components.rs:2620-2625`). The
-`cell_renderers` prop is consulted **only in read mode** (`data_td`,
-`components.rs:2452`), never for the active editor cell — so you cannot inject a
-custom `<select>` through `cell_renderers` either.
+> **UPDATE 2026-06-09:** chorale now has a native dropdown editor —
+> `EditorKind::Select { options: Vec<String> }` was added to chorale
+> (`chorale-core` variant + `chorale-dioxus` `editor_td` `<select>` rendering,
+> commit `39f3aec` on `feature/leptos-bug-batch`). It is reachable from
+> `budget-ui` **today** via a local `paths` override (`.cargo/config.toml`,
+> gitignored, pointing at a worktree at that commit) and lands on chorale `main`
+> when that branch merges. **Use it for the category editor** — the earlier
+> "no native select" gotcha is resolved.
 
-**Implications for the build agent — pick one:**
-1. Ship the category editor as a **text input** (`EditorKind::Text`) for the
-   first cut, with `validate_edit` enforcing membership in the category list
-   (`Err("unknown category")` otherwise). Lowest effort, compiles today.
-2. Build the dropdown **outside** chorale's edit path: render the category cell
-   read-only and trigger your own `<select>` overlay on click, then call
-   `handle.update_row(...)` directly (skip `on_commit_edit` entirely for that
-   column).
-3. File a chorale feature request for a `EditorKind::Select { options }` (or a
-   custom-editor renderer hook) and gate the dropdown on it.
+```rust
+// the category column becomes a real dropdown:
+ColumnDef::new(ColumnId("category"), "Category", |t: &Txn| {
+    CellValue::Text(t.category.clone())
+})
+.editor(EditorKind::Select { options: category_names.clone() })
+```
 
-The compile-verified snippet below uses option (1) (`EditorKind::Text` on
-`category`) because that is what the real API supports.
+- Renders a `<select>` constrained to `options`; the chosen option is the
+  committed value, so a category can't be mistyped (membership by construction).
+- **Commits on change** (a pick IS the commit) through `on_commit_edit` — same
+  `CommittedEdit<TRow>` payload as the text editor; Esc cancels. So the same
+  `on_commit_edit` handler (match `edit.column_id`, mutate, `update_row`) covers
+  both the `category` (Select) and `comment` (Text) columns.
+- The current cell value renders as the selected option.
 
-**Budget mapping:** transaction child table — `category` and `comment` columns
-get `.editor(EditorKind::Text)`; `amount`/`date`/etc. omit `.editor()` and stay
-read-only; `on_commit_edit` matches on `edit.column_id` and `update_row`s.
+**Budget mapping:** transaction child table — `category` gets
+`.editor(EditorKind::Select { options: <category list> })`, `comment` gets
+`.editor(EditorKind::Text)`; `amount`/`date`/etc. omit `.editor()` and stay
+read-only; one `on_commit_edit` matches on `edit.column_id` and `update_row`s.
 
 ---
 
@@ -511,9 +515,10 @@ pub fn ChoraleReconDemo() -> Element {
 |---|---|---|
 | Master/detail (Item 12) | Day-ledger parent table; each day expands to its transactions | `detail_renderer: Callback<Day, Element>`, child `Table { inline: true }` |
 | Grouping + aggregation (Item 8) | Child transaction table grouped by category, per-category subtotal | `s.grouping = vec![ColumnId("category")]` / `handle.set_grouping(...)`; `.aggregator(AggregatorKind::Sum)` on `amount` |
-| In-cell editing (Item 7) | `category` + `comment` editable; `amount`/`date` read-only | `.editor(EditorKind::Text)` on the two columns; `on_commit_edit: EventHandler<CommittedEdit<Txn>>` + `handle.update_row` |
+| In-cell editing (Item 7) | `category` = dropdown, `comment` = text; `amount`/`date` read-only | `category`: `.editor(EditorKind::Select { options })`; `comment`: `.editor(EditorKind::Text)`; one `on_commit_edit: EventHandler<CommittedEdit<Txn>>` + `handle.update_row` covers both |
 
-**Open decision for the build agent:** the category editor wants a dropdown;
-chorale v0.2.0 has no native `<select>` editor (§3 gotcha). Default to
-`EditorKind::Text` + `validate_edit` membership check, or build a host-side
-dropdown overlay calling `update_row` directly.
+**Category editor: RESOLVED 2026-06-09 — use native `EditorKind::Select { options }`**
+(§3). chorale gained a native dropdown editor; it is reachable from `budget-ui`
+now via the gitignored `.cargo/config.toml` `paths` override (worktree at the
+Select commit) and on chorale `main` once `feature/leptos-bug-batch` merges. No
+host-side overlay or text+validation workaround needed.

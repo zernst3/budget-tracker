@@ -15,3 +15,6 @@ crash.log
 
 # OS
 .DS_Store
+
+# Local-only cargo dev overrides (chorale Select worktree) — never commit
+.cargo/
