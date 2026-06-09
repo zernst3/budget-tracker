@@ -9,31 +9,18 @@ description = "Concrete adapters: SeaORM persistence (repository impls + UnitOfW
 [lints]
 workspace = true
 
-# The out-of-band single-user seed (SPEC §9; BUDGET-AUTH-GATE-1). A [[bin]] under
-# this EXISTING crate (it owns the repos + Argon2 + TOTP), not a new crate.
-[[bin]]
-name = "provision-user"
-path = "src/bin/provision_user.rs"
-
-# The re-runnable initial-load seed (SPEC §4.6, §12 D8; BUDGET-CUTOVER-1, step 9).
-# A [[bin]] under this EXISTING crate (it owns the repos + the SeaOrmUowProvider),
-# mirroring provision-user — NOT a new crate (ROUTE-1). It needs the
-# OnboardingService, which lives in budget-app-services (orchestration layer): the
-# infra -> app-services dependency edge below is bin-only in spirit (the infra LIB
-# does not use app-services), and introduces no cycle (app-services depends solely
-# on budget-domain, never on infra) and no new crate/topology boundary.
-[[bin]]
-name = "seed-onboarding"
-path = "src/bin/seed_onboarding.rs"
+# NOTE: the out-of-band admin CLIs (provision-user, seed-onboarding) were MOVED
+# to the `budget-server` crate (the server edge) in the frontend-scaffold phase.
+# They orchestrate app-services + infrastructure together, which belongs at the
+# server layer, not inside the infrastructure library. Moving them OUT lets this
+# crate drop its `budget-app-services` dependency edge: the infrastructure
+# LIBRARY now depends only on the layers below it (domain, entities, mappers,
+# migration), restoring strict downward layering (RUST-ENTITIES-13).
 
 [dependencies]
 budget-domain = { path = "../budget-domain" }
 budget-entities = { path = "../budget-entities" }
 budget-mappers = { path = "../budget-mappers" }
-# Bin-only use: the seed-onboarding [[bin]] needs OnboardingService. The infra
-# library code does NOT depend on app-services (correct layering held); only the
-# binary edge does. No cycle (app-services -> domain only). ROUTE-1: no new crate.
-budget-app-services = { path = "../budget-app-services" }
 
 # The schema Migrator (budget-migration::Migrator). The infrastructure crate is
 # the one place that connects to Postgres at startup, so it owns running pending

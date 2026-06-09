@@ -7,6 +7,8 @@ members = [
     "crates/budget-infrastructure",
     "crates/budget-app-services",
     "crates/budget-migration",
+    "crates/budget-ui",
+    "crates/budget-server",
 ]
 
 [workspace.package]
