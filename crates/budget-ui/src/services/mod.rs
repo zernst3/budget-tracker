@@ -11,7 +11,25 @@
 //! extractor before any handler logic (`BUDGET-AUTH-GATE-1`); `health` is the
 //! deliberate exception (an unauthenticated liveness probe that returns no user
 //! data).
+//!
+//! Phase B4 adds the core read-only month-view server functions: [`ensure_month`]
+//! (lazy-init) and [`get_month_view`] (budget/spent/remaining per category).
 
+pub mod auth;
 mod health;
+pub mod month_view;
+pub mod passkey;
 
+// The AuthedUser gate (`BUDGET-AUTH-GATE-1`) is server-only: it extracts the
+// session + server state and loads the user. Its types are referenced only from
+// `#[server]` bodies, which the macro strips on the wasm client target.
+#[cfg(feature = "server")]
+pub mod gate;
+
+pub use auth::{LoginRequest, current_user, login, logout};
 pub use health::health;
+pub use month_view::{CategoryRowDto, MonthViewDto, ensure_month, get_month_view};
+pub use passkey::{
+    finish_passkey_authentication, finish_passkey_registration, start_passkey_authentication,
+    start_passkey_registration,
+};

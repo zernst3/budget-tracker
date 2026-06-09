@@ -201,6 +201,95 @@ impl WebauthnService {
         }
     }
 
+    // ---- JSON boundary (the frontend HTTP ceremony) -----------------------
+    //
+    // The Dioxus server functions live in the `budget-ui` crate, which is
+    // deliberately free of any `webauthn-rs` dependency (it compiles to wasm).
+    // These methods are the JSON seam: they take/return `serde_json::Value`, so a
+    // server function can ship the challenge to the browser, stash the opaque
+    // ceremony state in the server-side session, and feed the browser's response
+    // back, without ever naming a `webauthn-rs` type. The binary shapes
+    // (`challenge`, credential ids) are the standard base64url the WebAuthn JSON
+    // serialization uses; the client JS converts them to/from `ArrayBuffer`.
+
+    /// Begin a registration ceremony, returning `(challenge, state)` as JSON.
+    ///
+    /// `challenge` is sent to the browser's `navigator.credentials.create`;
+    /// `state` is the opaque ceremony state the caller MUST stash server-side (in
+    /// the session) until [`finish_registration_json`](Self::finish_registration_json).
+    ///
+    /// # Errors
+    /// [`AuthError::Webauthn`] if the ceremony cannot be started or the challenge /
+    /// state cannot be serialized.
+    pub fn start_registration_json(
+        &self,
+        user_id: UserId,
+        user_name: &str,
+        user_display_name: &str,
+        existing: &[WebauthnCredential],
+    ) -> Result<(serde_json::Value, serde_json::Value), AuthError> {
+        let (challenge, state) =
+            self.start_registration(user_id, user_name, user_display_name, existing)?;
+        Ok((Self::to_value(&challenge)?, Self::to_value(&state)?))
+    }
+
+    /// Finish a registration ceremony from the browser's credential JSON and the
+    /// stashed ceremony-state JSON.
+    ///
+    /// # Errors
+    /// [`AuthError::Webauthn`] if either JSON value cannot be deserialized or the
+    /// credential fails verification.
+    pub fn finish_registration_json(
+        &self,
+        response: &serde_json::Value,
+        state: &serde_json::Value,
+    ) -> Result<RegisteredPasskey, AuthError> {
+        let response: RegisterPublicKeyCredential = Self::from_value(response)?;
+        let state: PasskeyRegistration = Self::from_value(state)?;
+        self.finish_registration(&response, &state)
+    }
+
+    /// Begin an authentication ceremony, returning `(challenge, state)` as JSON.
+    ///
+    /// # Errors
+    /// [`AuthError::Webauthn`] if no credentials are registered, the ceremony
+    /// cannot be started, or the challenge / state cannot be serialized.
+    pub fn start_authentication_json(
+        &self,
+        existing: &[WebauthnCredential],
+    ) -> Result<(serde_json::Value, serde_json::Value), AuthError> {
+        let (challenge, state) = self.start_authentication(existing)?;
+        Ok((Self::to_value(&challenge)?, Self::to_value(&state)?))
+    }
+
+    /// Finish an authentication ceremony from the browser's assertion JSON and the
+    /// stashed ceremony-state JSON.
+    ///
+    /// # Errors
+    /// [`AuthError::Webauthn`] if either JSON value cannot be deserialized or the
+    /// assertion fails verification.
+    pub fn finish_authentication_json(
+        &self,
+        response: &serde_json::Value,
+        state: &serde_json::Value,
+    ) -> Result<AuthenticationOutcome, AuthError> {
+        let response: PublicKeyCredential = Self::from_value(response)?;
+        let state: PasskeyAuthentication = Self::from_value(state)?;
+        self.finish_authentication(&response, &state)
+    }
+
+    fn to_value<T: serde::Serialize>(value: &T) -> Result<serde_json::Value, AuthError> {
+        serde_json::to_value(value)
+            .map_err(|e| AuthError::Webauthn(format!("webauthn serialize: {e}")))
+    }
+
+    fn from_value<T: serde::de::DeserializeOwned>(
+        value: &serde_json::Value,
+    ) -> Result<T, AuthError> {
+        serde_json::from_value(value.clone())
+            .map_err(|e| AuthError::Webauthn(format!("webauthn deserialize: {e}")))
+    }
+
     fn serialize_passkey(passkey: &Passkey) -> Result<RegisteredPasskey, AuthError> {
         let public_key = serde_json::to_vec(passkey)
             .map_err(|e| AuthError::Webauthn(format!("passkey serialize: {e}")))?;
@@ -258,6 +347,70 @@ mod tests {
         assert!(
             matches!(err, budget_domain::auth::AuthError::Webauthn(_)),
             "no-credentials authentication must surface a Webauthn error",
+        );
+    }
+
+    #[test]
+    fn registration_challenge_json_carries_the_browser_required_fields() {
+        // The JSON seam (start_registration_json) is what the frontend ships to
+        // the browser's navigator.credentials.create. The browser needs a
+        // `publicKey` object carrying `challenge`, the relying-party id, and the
+        // `user.id`; without these the ceremony cannot start. The binary fields are
+        // base64url strings in the webauthn-rs serialization (the client JS decodes
+        // them to ArrayBuffers); we assert they are present and string-typed, the
+        // contract the client bridge relies on.
+        let svc = WebauthnService::new("localhost", "http://localhost:8080", "Budget Tracker")
+            .expect("build");
+        let user_id = budget_domain::ids::UserId::generate();
+        let (challenge, state) = svc
+            .start_registration_json(user_id, "zach@example.com", "Zach", &[])
+            .expect("registration starts");
+
+        let public_key = challenge
+            .get("publicKey")
+            .expect("challenge has a publicKey object");
+        assert!(
+            public_key
+                .get("challenge")
+                .is_some_and(serde_json::Value::is_string),
+            "publicKey.challenge must be a base64url string for the browser",
+        );
+        assert_eq!(
+            public_key.pointer("/rp/id").and_then(|v| v.as_str()),
+            Some("localhost"),
+            "the relying-party id must travel to the browser verbatim",
+        );
+        assert!(
+            public_key
+                .pointer("/user/id")
+                .is_some_and(serde_json::Value::is_string),
+            "publicKey.user.id must be a base64url string for the browser",
+        );
+
+        // The ceremony STATE is the opaque blob stashed server-side between start
+        // and finish; it must survive a serde round-trip (it is stored in the
+        // session as JSON). A non-object / empty state would mean the
+        // danger-allow-state-serialisation feature is not actually serializing it.
+        assert!(
+            state.is_object() && state.as_object().is_some_and(|o| !o.is_empty()),
+            "the ceremony state must serialize to a non-empty object to stash in the session",
+        );
+    }
+
+    #[test]
+    fn finish_registration_json_rejects_a_garbage_response() {
+        // The finish seam must fail (not panic) when handed JSON that is not a
+        // valid credential — the opaque-rejection path the server function maps to
+        // a 401/400. Here we feed an empty object for both the response and the
+        // state.
+        let svc = WebauthnService::new("localhost", "http://localhost:8080", "Budget Tracker")
+            .expect("build");
+        let err = svc
+            .finish_registration_json(&serde_json::json!({}), &serde_json::json!({}))
+            .expect_err("garbage input must be rejected, not panic");
+        assert!(
+            matches!(err, budget_domain::auth::AuthError::Webauthn(_)),
+            "a malformed finish payload surfaces a Webauthn error",
         );
     }
 }

@@ -36,6 +36,8 @@ server = [
     "dioxus/server",
     "dep:budget-app-services",
     "dep:budget-infrastructure",
+    "dep:sea-orm",
+    "dep:tower-sessions",
     "dep:tokio",
     "dep:tracing",
 ]
@@ -70,7 +72,15 @@ chorale-core = { git = "https://github.com/zernst3/rust-chorale", branch = "main
 budget-domain = { path = "../budget-domain" }
 
 serde = { workspace = true }
+# serde_json carries the opaque WebAuthn ceremony JSON (challenge + the browser's
+# credential response) across the passkey server functions and the client-side
+# ceremony bridge. The binary shapes are base64url inside the JSON, so no raw
+# bytes cross the server-function boundary as a bespoke type.
+serde_json = { workspace = true }
 rust_decimal = { workspace = true }
+# chrono is pure Rust and safe on wasm32. Used in views (current month) and
+# server functions (ensure_current_month timestamp arg).
+chrono = { workspace = true }
 
 # Server-only: the use-case + persistence layers the server functions call
 # directly (RUST-DIOXUS-9). Gated `optional` so they are absent from the wasm
@@ -79,6 +89,14 @@ budget-app-services = { path = "../budget-app-services", optional = true }
 budget-infrastructure = { path = "../budget-infrastructure", optional = true }
 tokio = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
+
+# Server-only: the SeaORM connection the server state is built from, and the
+# tower-sessions `Session` handle the gate + login/logout server functions use.
+# Both are gated behind the `server` feature so they stay out of the wasm graph;
+# tower-sessions is version-locked to the 0.14 the infrastructure crate's session
+# store + AuthedUser extractor resolve against.
+sea-orm = { workspace = true, optional = true }
+tower-sessions = { version = "0.14", optional = true }
 
 # RUST-WASM-GETRANDOM-1: the dependency graph (uuid in budget-domain, ahash via
 # dioxus, etc.) transitively includes getrandom, whose wasm32 build fails to
@@ -89,3 +107,21 @@ tracing = { workspace = true, optional = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
 uuid = { workspace = true, features = ["js"] }
+# web-sys: service-worker registration in lib.rs (Phase B3 PWA shell).
+# Only used on wasm32 behind a `#[cfg(target_arch = "wasm32")]` block.
+web-sys = { version = "0.3", features = ["Navigator", "ServiceWorkerContainer", "Window"] }
+
+# Dev-deps for the server-side `AuthedUser`-gate integration test
+# (tests/auth_gate.rs, `#[cfg(feature = "server")]`). These drive the REAL gate
+# through a `FullstackContext` scope with an in-memory session + fake repos, so
+# no Postgres is needed. Versions are locked to the workspace / infrastructure
+# crate's resolutions (tower-sessions 0.14, axum 0.8, the sqlx-free memory-store).
+[dev-dependencies]
+budget-app-services = { path = "../budget-app-services" }
+budget-infrastructure = { path = "../budget-infrastructure" }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+axum = "0.8"
+http = "1"
+tower-sessions = { version = "0.14", features = ["memory-store"] }

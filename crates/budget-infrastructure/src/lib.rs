@@ -49,6 +49,7 @@ pub use plaid::{HttpPlaidApi, PlaidCredentials, PlaidEnvironment, SeaOrmPlaidSyn
 // Auth subsystem (build step 7, BUDGET-AUTH-GATE-1): the concrete adapters of
 // the domain auth ports, the session store + cookie policy, and the AuthedUser
 // gate. The HTTP host that mounts the gate is the frontend phase.
+pub use auth::webauthn::{AuthenticationOutcome, RegisteredPasskey};
 pub use auth::{
     Argon2idHasher, AuthState, AuthedUser, AzureKeyVault, Rfc6238TotpService, SessionLayerConfig,
     WebauthnService, build_session_layer,

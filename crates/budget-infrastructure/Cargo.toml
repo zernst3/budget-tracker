@@ -66,9 +66,18 @@ argon2 = { version = "0.5", features = ["std"] }
 # enables the provisioning-URI / Secret helpers for enrollment.
 totp-rs = { version = "5", features = ["otpauth", "gen_secret"] }
 
-# WebAuthn / passkeys (SPEC §9.1). The core ceremony engine; danger-* features
-# are NOT enabled (we keep the safe defaults).
-webauthn-rs = "0.5"
+# WebAuthn / passkeys (SPEC §9.1). The core ceremony engine.
+#
+# `danger-allow-state-serialisation` lets the in-progress ceremony state
+# (`PasskeyRegistration` / `PasskeyAuthentication`) derive serde so it can be
+# stashed BETWEEN the start and finish HTTP round-trips. The feature name is
+# alarmist: the actual requirement webauthn-rs documents is that the state MUST
+# be stored SERVER-SIDE (never handed to the client), which the Postgres-backed
+# `tower-sessions` store satisfies exactly. The frontend phase needs this because
+# the start ceremony runs in one server function and the finish in another, with
+# the browser WebAuthn API call in between; the state lives in the server-side
+# session keyed to the session cookie, not in any client-reachable place.
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
 
 # Postgres-backed server-side session store (SPEC §9.1: survives scale-to-zero).
 # tower-sessions owns the cookie + session lifecycle; the sqlx store owns its own
