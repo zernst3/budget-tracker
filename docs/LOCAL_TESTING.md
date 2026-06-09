@@ -1,0 +1,310 @@
+# Stage-1 Local Testing Runbook
+
+Run the full budget-tracker app on your laptop — no real Plaid, no Neon, no
+Azure. The mock Plaid integration serves the same fixture pages through the
+real mapper and sync engine, so Pull -> Pending -> triage, the month ledger,
+and fund math can all be shaken out before a deploy.
+
+---
+
+## Prerequisites
+
+- Rust toolchain (see `rust-toolchain.toml`)
+- Docker (for local Postgres)
+- `dx` CLI: `cargo install dioxus-cli` (same version as `dioxus-cli-config` in
+  `Cargo.toml`)
+- A TOTP authenticator app (Authy, 1Password, Google Authenticator, etc.)
+
+---
+
+## Step 1 — Start a local Postgres
+
+```bash
+docker run -d \
+  --name budget-local-pg \
+  -e POSTGRES_USER=budget \
+  -e POSTGRES_PASSWORD=localpass \
+  -e POSTGRES_DB=budget_local \
+  -p 5432:5432 \
+  postgres:16
+```
+
+Set the connection URL for every subsequent command:
+
+```bash
+export DATABASE_URL="postgres://budget:localpass@localhost:5432/budget_local"
+```
+
+---
+
+## Step 2 — Set the local environment
+
+Copy these into your shell (or a `.env` file you source manually):
+
+```bash
+export DATABASE_URL="postgres://budget:localpass@localhost:5432/budget_local"
+
+# Enable the mock Plaid integration (CRITICAL SAFETY: never set in production).
+export PLAID_MODE=mock
+
+# Allow the session cookie without HTTPS on localhost.
+export SECURE_COOKIES=false
+
+# WebAuthn relying-party — must match the origin you open in the browser.
+# The dx serve default is port 8080.
+export WEBAUTHN_RP_ID=localhost
+export WEBAUTHN_RP_ORIGIN=http://localhost:8080
+
+# Session secret (any 64+ hex chars; only used locally).
+export SESSION_SECRET=0000000000000000000000000000000000000000000000000000000000000001
+```
+
+> No `PLAID_CLIENT_ID`, `PLAID_SECRET`, or `KEY_VAULT_URL` are needed.
+> The server will log a loud WARN at startup confirming mock mode is active.
+
+---
+
+## Step 3 — Run migrations
+
+Migrations are applied automatically by every seed bin and by the server at
+startup, but you can run them manually to verify the schema:
+
+```bash
+cargo run -p budget-server --bin seed-local-demo --
+# (seed-local-demo runs migrations as its first step; see Step 5)
+```
+
+Or via the provision-user bin (also runs migrations):
+
+```bash
+# Continue to Step 4 — provision-user runs migrations for you.
+```
+
+---
+
+## Step 4 — Provision the single user
+
+```bash
+DATABASE_URL="postgres://budget:localpass@localhost:5432/budget_local" \
+PROVISION_EMAIL="zach@local.dev" \
+PROVISION_PASSWORD="supersecret-local-12" \
+PROVISION_TRACKING_START="$(date +%Y-%m-01)" \
+cargo run -p budget-server --bin provision-user
+```
+
+The command prints something like:
+
+```
+user created: 6ba7b810-...
+email: zach@local.dev
+tracking_start_date: 2026-06-01
+
+Add this TOTP to your authenticator app (scan or paste the URI):
+otpauth://totp/budget-tracker%3Azach%40local.dev?secret=ABC...&issuer=budget-tracker
+```
+
+**Scan the `otpauth://` URI with your authenticator app now.** It is the only
+time the TOTP secret is surfaced. Passkey (biometric) registration requires a
+real HTTPS origin and a physical authenticator — use password + TOTP for all
+local testing.
+
+Re-running `provision-user` with the same email resets the password and TOTP
+(idempotent).
+
+---
+
+## Step 5 — Seed the demo data
+
+```bash
+DATABASE_URL="postgres://budget:localpass@localhost:5432/budget_local" \
+SEED_EMAIL="zach@local.dev" \
+cargo run -p budget-server --bin seed-local-demo
+```
+
+This creates (all idempotent):
+
+| Row | Detail |
+|-----|--------|
+| Budget | "Local Demo Budget" (current month, no `effective_to`) |
+| Categories | Rent $2500 (Fixed/TrueSet), Utilities $130 (Fixed/FlexibleSet×2 bills), Subscriptions $80 (Fixed/TrueSet), Groceries $600, Dining $300, Transport $150, Misc $200, Other (rollover bucket) |
+| Month | Current calendar month, `open` |
+| Buffer fund | Emergency Buffer — $5000 balance, $6000 target, `compulsory_repayment=true` |
+| Surplus fund | Vacation Savings — $1200 balance, no target, `compulsory_repayment=false` |
+| PlaidItem | "Mock Bank (local dev)" — `access_token_ref=mock-access-token-local-dev` |
+| Accounts | BoA Checking (`mock-account-checking`) + BoA Credit Card (`mock-account-credit`) |
+| Transactions | Rent $-2500 (categorized) + Whole Foods $-84.30 (categorized, with comment) |
+
+The seed is re-runnable: a second run upserts to identical state.
+
+---
+
+## Step 6 — Start the app
+
+```bash
+dx serve --package budget-ui
+```
+
+Or, if you prefer a plain cargo run (same binary, different entry):
+
+```bash
+cargo run -p budget-server
+```
+
+The server binds to `http://localhost:8080` by default (the `dx serve` port).
+
+You should see in the terminal:
+
+```
+WARN budget_infrastructure::plaid::mock_client: PLAID_MODE=mock — using the
+     LOCAL MockPlaidApi + in-memory secret store (fake bank data; NO real
+     Plaid / Key Vault). This is a local-testing path; it must NEVER be set
+     in production.
+INFO budget_server: budget-server listening address=0.0.0.0:8080
+```
+
+---
+
+## Step 7 — Log in
+
+Open `http://localhost:8080` in your browser.
+
+1. Enter `zach@local.dev` and the password you set in `provision-user`.
+2. Enter the current TOTP code from your authenticator app.
+
+> Passkey (biometric) login requires a real HTTPS origin bound to `localhost`
+> with a physical authenticator device. It will not work in this local HTTP
+> setup. Password + TOTP is the correct local path.
+
+---
+
+## Step 8 — Manual QA loop
+
+### Ledger (month view)
+
+1. Navigate to the Ledger (the current month).
+2. Verify the two pre-seeded transactions appear in day-rows (Rent $2500 on
+   the 1st, Whole Foods $84.30 on the 1st).
+3. Expand a day row — verify the category-grouped child table renders (Rent in
+   Fixed/Rent, Whole Foods in Discretionary/Groceries).
+4. Click the category dropdown on the Whole Foods row and change it to Dining.
+   Verify the row moves to the Dining group after save.
+5. Click the comment field on a row and add/edit a comment. Verify it persists
+   on refresh.
+6. Verify the budget-remaining math updates: Groceries should show $515.70
+   remaining, Dining should show $215.70 remaining after the reassignment.
+
+### Pull (first time — page 1)
+
+7. Navigate to Pending / Triage.
+8. Click **Pull**. The mock serves page 1: four transactions.
+   - `mock-txn-0001-grocery` — Whole Foods $84.30 (settled, BoA Checking)
+   - `mock-txn-0002-gas` — Chevron $42.15 (settled, BoA Checking)
+   - `mock-txn-0003-refund` — Amazon Refund $-22.99 (settled inflow, BoA Checking)
+   - `mock-txn-0004-restaurant-pending` — The Smith $67.50 (**pending** — must NOT
+     appear in the Pending triage inbox)
+9. The triage inbox should show **3 uncategorized rows** (the 3 settled ones).
+   The pending restaurant must be absent (`SPEC §4.4`).
+10. Triage the three rows through each of the three treatments:
+    - **Categorize**: assign the grocery to Groceries and save. Verify it
+      disappears from the inbox (now categorized, no longer pending-triage).
+    - **Buffer draw**: assign the gas to Transport and mark it as a buffer draw
+      (if the UI exposes it). Verify the Emergency Buffer balance decreases.
+    - **Surplus draw**: assign the refund (inflow) to Misc. Verify it clears.
+11. Verify the Ledger now shows the newly-categorized transactions in their
+    respective day-rows.
+
+### Pull (second time — page 2)
+
+12. Click **Pull** again. The mock serves page 2:
+    - **modified**: `mock-txn-0004-restaurant-pending` → now settled (pending
+      `false`), with `pending_transaction_id` linking back to the original id.
+      This is the pending->settled transition. The Smith $67.50 should NOW
+      appear in the Pending inbox (it is settled and uncategorized).
+    - **added**: Spotify $9.99 (a new subscription transaction, settled).
+13. Triage The Smith and Spotify (categorize both).
+14. Verify the inbox clears.
+
+### Pull (third time — page 3)
+
+15. Click **Pull** a third time. The mock serves page 3:
+    - **removed**: `mock-txn-0002-gas` (the Chevron). If it was categorized,
+      it should disappear from the Ledger; if it had a settlement match, the
+      placeholder should be restored.
+    - **added**: Blue Bottle Coffee $5.50 (a new discretionary transaction).
+16. Verify the gas row is gone from the Ledger.
+17. Triage the coffee row.
+
+### Pull (steady state)
+
+18. Click **Pull** again. The mock serves the empty steady-state page (no
+    added/modified/removed). The inbox should still be empty. The cursor
+    is stable: subsequent pulls keep returning the empty page (idempotent).
+
+### Funds
+
+19. Navigate to the Funds view (if available in the current UI phase).
+20. Verify Emergency Buffer shows balance $5000 / target $6000 (below target,
+    flagged with outstanding-obligation indicator if you did a buffer draw
+    in step 10).
+21. Verify Vacation Savings shows $1200 with no target.
+
+---
+
+## Environment variable reference
+
+| Variable | Required | Value |
+|----------|----------|-------|
+| `DATABASE_URL` | Yes | `postgres://budget:localpass@localhost:5432/budget_local` |
+| `PLAID_MODE` | Yes (mock) | `mock` |
+| `SECURE_COOKIES` | Yes (local) | `false` |
+| `WEBAUTHN_RP_ID` | Optional | `localhost` (default) |
+| `WEBAUTHN_RP_ORIGIN` | Optional | `http://localhost:8080` (default) |
+| `SESSION_SECRET` | Recommended | any 64+ hex chars |
+
+Do NOT set `PLAID_CLIENT_ID`, `PLAID_SECRET`, or `KEY_VAULT_URL` for local
+testing. If any of those are present AND `PLAID_MODE=mock` is also set, the
+mock wins (explicit opt-in takes precedence). If `PLAID_MODE` is unset and
+the Plaid/Vault vars are also missing, Pull returns `503` (expected: you just
+have no bank linked and no mock active).
+
+---
+
+## Reset / re-seed
+
+To wipe and start fresh:
+
+```bash
+docker exec -it budget-local-pg psql -U budget -c "DROP DATABASE budget_local;"
+docker exec -it budget-local-pg psql -U budget -c "CREATE DATABASE budget_local;"
+# Then repeat Steps 3-6.
+```
+
+Or just re-run the seed bins — they are idempotent and will upsert to the
+same state without wiping anything.
+
+---
+
+## Troubleshooting
+
+**"no user with email ... run provision-user first"**
+Run Step 4 before Step 5.
+
+**Pull button returns 503**
+`PLAID_MODE=mock` is not set. Add it to your environment and restart the
+server.
+
+**Login fails with "invalid TOTP"**
+The TOTP clock may be drifted or you scanned the wrong URI. Re-run
+`provision-user` (same email) to re-enroll a fresh TOTP secret, then scan
+the new URI.
+
+**Session cookie not set / immediate redirect to login**
+`SECURE_COOKIES` is not set to `false`. The browser refuses a `Secure` cookie
+over plain HTTP. Set `SECURE_COOKIES=false`.
+
+**"plaid item not found" or Pull does nothing**
+`seed-local-demo` was not run, or was run against a different `DATABASE_URL`.
+Verify the PlaidItem row exists:
+```bash
+psql "$DATABASE_URL" -c "SELECT id, institution_name FROM plaid_items;"
+```

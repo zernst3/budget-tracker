@@ -44,6 +44,14 @@ path = "src/bin/provision_user.rs"
 name = "seed-onboarding"
 path = "src/bin/seed_onboarding.rs"
 
+# STAGE-1 local-testing seed. Populates a LOCAL Postgres with a realistic demo
+# budget (categories, month, funds, fake PlaidItem, pre-settled txns) so every
+# UI screen has content before the first Pull. Requires only DATABASE_URL +
+# SEED_EMAIL; NO Plaid credentials, NO Azure.
+[[bin]]
+name = "seed-local-demo"
+path = "src/bin/seed_local_demo.rs"
+
 [dependencies]
 # The fullstack app, server side. The `server` feature pulls Dioxus's server
 # runtime and the app-services/infrastructure stack into budget-ui's graph.
