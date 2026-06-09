@@ -2,7 +2,7 @@
   "added": [
     {
       "transaction_id": "mock-txn-0005-subscription",
-      "account_id": "mock-acct-credit-002",
+      "account_id": "mock-account-credit",
       "amount": 15.99,
       "iso_currency_code": "USD",
       "unofficial_currency_code": null,
@@ -18,7 +18,7 @@
   "modified": [
     {
       "transaction_id": "mock-txn-0004-restaurant-settled",
-      "account_id": "mock-acct-credit-002",
+      "account_id": "mock-account-credit",
       "amount": 71.45,
       "iso_currency_code": "USD",
       "unofficial_currency_code": null,
@@ -34,7 +34,7 @@
   "removed": [],
   "accounts": [
     {
-      "account_id": "mock-acct-credit-002",
+      "account_id": "mock-account-credit",
       "name": "Mock Rewards Card",
       "official_name": "Mock Bank Platinum Rewards Card",
       "type": "credit",

@@ -2,7 +2,7 @@
   "added": [
     {
       "transaction_id": "mock-txn-0001-grocery",
-      "account_id": "mock-acct-checking-001",
+      "account_id": "mock-account-checking",
       "amount": 84.30,
       "iso_currency_code": "USD",
       "unofficial_currency_code": null,
@@ -16,7 +16,7 @@
     },
     {
       "transaction_id": "mock-txn-0002-gas",
-      "account_id": "mock-acct-credit-002",
+      "account_id": "mock-account-credit",
       "amount": 47.15,
       "iso_currency_code": "USD",
       "unofficial_currency_code": null,
@@ -30,7 +30,7 @@
     },
     {
       "transaction_id": "mock-txn-0003-refund",
-      "account_id": "mock-acct-credit-002",
+      "account_id": "mock-account-credit",
       "amount": -22.99,
       "iso_currency_code": "USD",
       "unofficial_currency_code": null,
@@ -44,7 +44,7 @@
     },
     {
       "transaction_id": "mock-txn-0004-restaurant-pending",
-      "account_id": "mock-acct-credit-002",
+      "account_id": "mock-account-credit",
       "amount": 63.80,
       "iso_currency_code": "USD",
       "unofficial_currency_code": null,
@@ -61,7 +61,7 @@
   "removed": [],
   "accounts": [
     {
-      "account_id": "mock-acct-checking-001",
+      "account_id": "mock-account-checking",
       "name": "Mock Checking",
       "official_name": "Mock Bank Checking Account",
       "type": "depository",
@@ -69,7 +69,7 @@
       "mask": "0001"
     },
     {
-      "account_id": "mock-acct-credit-002",
+      "account_id": "mock-account-credit",
       "name": "Mock Rewards Card",
       "official_name": "Mock Bank Platinum Rewards Card",
       "type": "credit",

@@ -2,7 +2,7 @@
   "added": [
     {
       "transaction_id": "mock-txn-0006-coffee",
-      "account_id": "mock-acct-credit-002",
+      "account_id": "mock-account-credit",
       "amount": 5.75,
       "iso_currency_code": "USD",
       "unofficial_currency_code": null,
@@ -23,7 +23,7 @@
   ],
   "accounts": [
     {
-      "account_id": "mock-acct-credit-002",
+      "account_id": "mock-account-credit",
       "name": "Mock Rewards Card",
       "official_name": "Mock Bank Platinum Rewards Card",
       "type": "credit",
