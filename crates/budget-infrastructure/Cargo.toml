@@ -9,6 +9,12 @@ description = "Concrete adapters: SeaORM persistence (repository impls + UnitOfW
 [lints]
 workspace = true
 
+# The out-of-band single-user seed (SPEC §9; BUDGET-AUTH-GATE-1). A [[bin]] under
+# this EXISTING crate (it owns the repos + Argon2 + TOTP), not a new crate.
+[[bin]]
+name = "provision-user"
+path = "src/bin/provision_user.rs"
+
 [dependencies]
 budget-domain = { path = "../budget-domain" }
 budget-entities = { path = "../budget-entities" }
