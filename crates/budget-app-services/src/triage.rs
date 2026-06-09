@@ -170,6 +170,22 @@ impl TriageService {
         Ok(rows.iter().map(PendingTransaction::from).collect())
     }
 
+    /// All funds for `user_id` (`SPEC §4.9`): the buffer pool and any surplus
+    /// funds. The triage UI offers these as the targets for the two fund-backed
+    /// treatments — `PayFromSavings` (draw any fund) and `SpreadOverMonths` (which
+    /// requires a `Buffer` fund). The service does not pre-filter by kind here: the
+    /// treatment-time validation in [`crate::fund::FundService`] enforces the
+    /// kind rule, and surfacing all funds lets the UI label each one's kind.
+    ///
+    /// # Errors
+    /// [`DomainError`] on any persistence failure.
+    pub async fn list_funds(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<budget_domain::Fund>, DomainError> {
+        Ok(self.funds.fund_repo().list_for_user(user_id).await?)
+    }
+
     /// Atomically triage one pending transaction (`SPEC §7`): set category + comment
     /// and apply exactly one [`Treatment`], all in ONE unit of work
     /// (`SERVICE-TX-1`).

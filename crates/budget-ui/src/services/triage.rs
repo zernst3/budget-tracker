@@ -61,6 +61,26 @@ pub struct PendingRowDto {
     pub account_id: Option<String>,
 }
 
+/// One selectable fund for the triage treatment pickers (`SPEC §4.9`). Surfaced
+/// by [`list_funds`] so the UI can offer a fund target for the two fund-backed
+/// treatments and label each one's kind + current balance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FundDto {
+    /// Stable fund id — the treatment target.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Fund kind as a lowercase label (`"buffer"` / `"surplus"`). `SpreadOverMonths`
+    /// (buffer-financing) requires a `"buffer"` fund; the UI uses this to gate which
+    /// funds it offers for that treatment.
+    pub kind: String,
+    /// `true` for the buffer (`compulsory_repayment = true`) pool — the only kind
+    /// valid for `SpreadOverMonths`.
+    pub is_buffer: bool,
+    /// Current balance (`Money`; signed, normally positive).
+    pub balance: Money,
+}
+
 /// The treatment to apply at triage (`SPEC §7` / `§4.9`): exactly one of three
 /// paths. The wire shape carries the discriminant plus the path-specific
 /// parameters; the server fn maps it to the app-services
@@ -204,6 +224,51 @@ pub async fn get_pending_inbox() -> Result<Vec<PendingRowDto>, dioxus::prelude::
             amount: p.amount,
             description: p.description,
             account_id: p.account_id.map(|a| a.to_string()),
+        })
+        .collect())
+}
+
+/// List the authenticated user's funds (`SPEC §4.9`), gated by session auth
+/// (`BUDGET-AUTH-GATE-1`).
+///
+/// The triage UI offers these as the fund target for the two fund-backed
+/// treatments: `PayFromSavings` accepts any fund; `SpreadOverMonths`
+/// (buffer-financing) requires a `buffer` fund (`is_buffer = true`). Returning all
+/// funds with their kind lets the UI gate the picker. No money math runs here —
+/// the `Money` balance crosses the wire as an exact Decimal (`BUDGET-MONEY-1`).
+///
+/// # Errors
+///
+/// `ServerFnError` (HTTP 401) when there is no valid session; HTTP 500 on any
+/// persistence failure.
+#[allow(clippy::unused_async)]
+#[server]
+pub async fn list_funds() -> Result<Vec<FundDto>, dioxus::prelude::ServerFnError> {
+    use budget_domain::FundKind;
+
+    use crate::server_state::TriageState;
+    use crate::services::gate::require_authed_user;
+
+    let user = require_authed_user().await?;
+    let state = TriageState::extract().await?;
+
+    let funds = state
+        .triage
+        .list_funds(user.id())
+        .await
+        .map_err(|e| domain_error(&e))?;
+
+    Ok(funds
+        .into_iter()
+        .map(|f| FundDto {
+            id: f.id.to_string(),
+            name: f.name,
+            kind: match f.kind {
+                FundKind::Buffer => "buffer".to_owned(),
+                FundKind::Surplus => "surplus".to_owned(),
+            },
+            is_buffer: matches!(f.kind, FundKind::Buffer),
+            balance: f.balance,
         })
         .collect())
 }

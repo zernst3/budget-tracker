@@ -119,7 +119,7 @@ fn money_to_cell_f64(m: budget_domain::Money) -> f64 {
 /// Operates on the exact `Decimal` (round to cents, then group the integer part)
 /// — NO float is involved, so this is `BUDGET-MONEY-1`-clean even though it is a
 /// display helper. Negative values render with a leading `-` before the `$`.
-fn fmt_currency(m: budget_domain::Money) -> String {
+pub(crate) fn fmt_currency(m: budget_domain::Money) -> String {
     let d = m.as_decimal().round_dp(2);
     let negative = d.is_sign_negative() && !d.is_zero();
     let abs = d.abs();
@@ -400,7 +400,11 @@ pub fn LedgerView() -> Element {
             div {
                 style: "display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;",
                 h1 { style: "margin: 0;", "Ledger" }
-                button { onclick: on_logout, style: "cursor: pointer;", "Sign out" }
+                div {
+                    style: "display: flex; gap: 0.75rem; align-items: center;",
+                    Link { to: Route::PendingView {}, "Pending triage" }
+                    button { onclick: on_logout, style: "cursor: pointer;", "Sign out" }
+                }
             }
 
             // -- Month navigation --

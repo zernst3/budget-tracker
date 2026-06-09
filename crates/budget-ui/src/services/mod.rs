@@ -42,6 +42,6 @@ pub use passkey::{
     start_passkey_registration,
 };
 pub use triage::{
-    PendingRowDto, PullResultDto, TreatmentDto, TriageRequestDto, TriageResultDto,
-    get_pending_inbox, pull, triage_transaction,
+    FundDto, PendingRowDto, PullResultDto, TreatmentDto, TriageRequestDto, TriageResultDto,
+    get_pending_inbox, list_funds, pull, triage_transaction,
 };

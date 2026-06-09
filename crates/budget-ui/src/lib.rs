@@ -44,7 +44,7 @@ pub mod server_state;
 
 use dioxus::prelude::*;
 
-use views::{LedgerView, Login};
+use views::{LedgerView, Login, PendingView};
 
 /// The application route table.
 ///
@@ -60,6 +60,11 @@ pub enum Route {
     /// The authenticated month-ledger view (`SPEC §7`).
     #[route("/budget")]
     LedgerView {},
+    /// The authenticated Pending triage inbox + Pull (`SPEC §7`): the transaction
+    /// intake screen where newly-pulled settled transactions get category +
+    /// comment + one of the three `SPEC §4.9` treatments.
+    #[route("/pending")]
+    PendingView {},
 }
 
 /// The root application component, shared by the server (SSR) and web (hydrate)
