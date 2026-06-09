@@ -278,6 +278,34 @@ charge pops up.
   silently drop it or silently overspend.
 - Modeled as a `transactions` row with `status='expected'`, `source='manual'`.
 
+### 4.11 Internal transfers (the credit-card-payment double-count fix — D10, added 2026-06-09)
+A real correctness gap (Zach, 2026-06-09): with **both** checking and the credit card linked, individual
+**card charges already count as expenses**, so the **checking withdrawal that pays the card balance is NOT
+an expense** — it is money moving between the user's own accounts. Counting both double-counts. The same is
+true of any **internal transfer** (checking ↔ savings). And it has **two legs**: the checking **outflow**
+(currently miscounted as an expense) AND the card-side **payment credit** (an inflow that would wrongly
+offset expenses). Both must be excluded.
+
+- **Model:** a `transactions.is_transfer` flag. A transfer is **TRACKED** (visible in the ledger, distinct
+  styling) but **EXCLUDED from budget math** — both the expense-remaining sum and any income offset. The
+  exclusion lives in the ONE predicate `counts_in_month_expense_remaining` (`& !is_transfer`, `SPEC §4.3`)
+  and its SQL-aggregate mirror, exactly parallel to `is_fund_draw` — so a transfer can never leak into a
+  category's spent, the day total, the month net, or the rolling Other.
+- **Generality:** covers ANY internal account movement (credit-card payments, checking↔savings), not just
+  cards — one mechanism.
+- **Detection = MANUAL + Plaid AUTO-SUGGEST (DECIDED 2026-06-09).** Triage (§7) gains a **4th treatment,
+  "Transfer / card payment — not an expense,"** which sets `is_transfer=true` and removes the row from the
+  inbox **without** requiring a category. The app **auto-suggests** it: Plaid's
+  `personal_finance_category.detailed` is captured at ingest into `transactions.plaid_category`, and when it
+  indicates a card payment / account transfer (`LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`, `TRANSFER_OUT`,
+  `TRANSFER_IN`) the triage UI **pre-selects** the Transfer treatment. It is **never auto-applied** — the
+  user confirms (or overrides), keeping a Plaid mis-tag from silently mutating budget math. Both legs (the
+  checking outflow and the card-side credit) surface in the inbox and get flagged.
+- **Pending-inbox predicate** becomes `status='settled' AND category_id IS NULL AND is_transfer = false`
+  (a triaged transfer leaves the inbox via `is_transfer=true`, not via a category).
+- *(Auto-pairing the two legs into a linked, reconciled match is a possible future enhancement; V1 flags
+  each leg independently via the suggestion.)*
+
 ## 5. Data model / schema
 
 ```
@@ -339,6 +367,11 @@ transactions
                                             -- (set on the placeholder row). Linked once; reversible on Plaid 'removed'
   comment text?,              -- §7: user's free-text note on an expense, distinct from `description`
                               -- (the Plaid/merchant string). Inline-editable in the ledger + at triage.
+  is_transfer bool default false,  -- D10/§4.11: an internal account movement (credit-card payment,
+                              -- checking↔savings transfer). TRACKED but EXCLUDED from expense AND income
+                              -- math (both legs). Set at triage (the 4th treatment); never auto-applied.
+  plaid_category text?,       -- Plaid personal_finance_category.detailed (e.g. LOAN_PAYMENTS_CREDIT_CARD_PAYMENT),
+                              -- captured at ingest; drives the §4.11 transfer AUTO-SUGGEST. Audit/suggestion only.
   is_rollover bool,           -- system-generated 1st-of-month line item
   created_at, updated_at
 
@@ -600,6 +633,13 @@ in `CONVENTIONS.md` (the Camerata-emitted ruleset).
   `remaining = 0`. It is **elective per occurrence** (the threshold only surfaces the option); below the
   threshold, or if declined, the deficit simply rolls in full per §4.3. The 75% threshold is a config
   value.
+- **D10 — Internal transfers excluded from budget math (`BUDGET-TRANSFER-EXCLUDE-1`): RESOLVED 2026-06-09.**
+  See §4.11. An internal account movement (credit-card payment, checking↔savings) is TRACKED but EXCLUDED
+  from expense AND income math (both legs), via a `transactions.is_transfer` flag excluded in the single
+  `counts_in_month_expense_remaining` predicate + its SQL mirror. Detection = **manual triage 4th treatment
+  + Plaid auto-suggest** (capture `personal_finance_category.detailed` into `transactions.plaid_category`;
+  pre-select Transfer for card-payment/transfer categories; never auto-applied). Pending inbox =
+  `settled AND category_id IS NULL AND is_transfer = false`.
 - **Savings funds vs. the buffer — RESOLVED 2026-06-09 (was the open `savings`-routing item).** These
   are two **distinct** things, on opposite sides of the tracked/untracked line:
   - The **buffer** (Zach's rotating ~$15k emergency/overflow reserve) is an **untracked external pool**
