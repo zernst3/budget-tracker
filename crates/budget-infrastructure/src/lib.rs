@@ -13,7 +13,15 @@
 //! The schema migration runner is also wired: [`run_pending_migrations`] applies
 //! the `budget-migration` `Migrator` so the SPEC §5 tables and §12 DB
 //! constraints exist before any repository runs.
+//!
+//! Build step 7 adds the [`auth`] subsystem (`BUDGET-AUTH-GATE-1`, `SPEC §9.1`):
+//! the Argon2id password hasher, the RFC 6238 TOTP engine (`AUTH-1/2`), the
+//! `webauthn-rs` passkey engine, the Postgres-backed session store + secure
+//! cookie policy, the [`AuthedUser`](auth::AuthedUser) enforce-by-construction
+//! gate, the Azure Key Vault secret-vault client
+//! (`BUDGET-PLAID-TOKEN-VAULT-1`), and the `webauthn_credentials` repository.
 
+pub mod auth;
 pub mod conn;
 pub mod error;
 pub mod repositories;
@@ -29,7 +37,16 @@ pub use repositories::paycheck_config::PostgresPaycheckConfigRepository;
 pub use repositories::plaid_items::PostgresPlaidItemRepository;
 pub use repositories::transactions::PostgresTransactionRepository;
 pub use repositories::users::PostgresUserRepository;
+pub use repositories::webauthn_credentials::PostgresWebauthnCredentialRepository;
 pub use uow::{SeaOrmUow, SeaOrmUowProvider};
+
+// Auth subsystem (build step 7, BUDGET-AUTH-GATE-1): the concrete adapters of
+// the domain auth ports, the session store + cookie policy, and the AuthedUser
+// gate. The HTTP host that mounts the gate is the frontend phase.
+pub use auth::{
+    Argon2idHasher, AuthState, AuthedUser, AzureKeyVault, Rfc6238TotpService, SessionLayerConfig,
+    WebauthnService, build_session_layer,
+};
 
 use sea_orm_migration::MigratorTrait;
 

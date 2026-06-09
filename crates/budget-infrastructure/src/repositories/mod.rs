@@ -27,6 +27,7 @@ pub mod paycheck_config;
 pub mod plaid_items;
 pub mod transactions;
 pub mod users;
+pub mod webauthn_credentials;
 
 #[cfg(test)]
 mod mock_tests;

@@ -46,8 +46,55 @@ sea-orm = { workspace = true, features = [
     "with-uuid",
 ] }
 
-# Other concrete-tech deps (reqwest for Plaid, azure_* for Key Vault, TOTP,
-# etc.) get added here as each subsystem lands during the backend build.
+# ---- Auth subsystem (build step 7, BUDGET-AUTH-GATE-1, SPEC §9.1) ----------
+# All concrete auth tech lives in this (infrastructure) crate per the layering:
+# domain holds the ports, app-services orchestrates, infra implements.
+
+# Argon2id password hashing (SPEC §9.1). default features give password-hash +
+# rand (salt generation) + alloc; std is enabled for the OsRng salt source.
+argon2 = { version = "0.5", features = ["std"] }
+
+# RFC 6238 TOTP, mandatory second factor (SPEC §9.1, AUTH-1/2). `otpauth`
+# enables the provisioning-URI / Secret helpers for enrollment.
+totp-rs = { version = "5", features = ["otpauth", "gen_secret"] }
+
+# WebAuthn / passkeys (SPEC §9.1). The core ceremony engine; danger-* features
+# are NOT enabled (we keep the safe defaults).
+webauthn-rs = "0.5"
+
+# Postgres-backed server-side session store (SPEC §9.1: survives scale-to-zero).
+# tower-sessions owns the cookie + session lifecycle; the sqlx store owns its own
+# `tower_sessions.session` table and migrates it at startup.
+#
+# Pinned to 0.14: tower-sessions-sqlx-store 0.15 depends on tower-sessions-core
+# 0.14, so the session layer (tower-sessions) MUST also resolve to the 0.14 core
+# for PostgresStore to implement the layer's SessionStore trait. 0.14 uses
+# axum-core 0.5 (axum 0.8-compatible).
+tower-sessions = "0.14"
+tower-sessions-sqlx-store = { version = "0.15", features = ["postgres"] }
+
+# The AuthedUser extractor + the in-crate minimal Axum test harness
+# (BUDGET-AUTH-GATE-1 enforce-by-construction). The HTTP host itself is the
+# frontend phase; here axum is used only to define + test the extractor.
+axum = "0.8"
+http = "1"
+
+# Azure Key Vault read-by-reference for DB creds + (step 8) the Plaid token
+# (BUDGET-PLAID-TOKEN-VAULT-1). Managed-identity auth via azure_identity.
+azure_core = "1"
+azure_identity = "1"
+azure_security_keyvault_secrets = "1"
+
+# Direct sqlx handle for the session store (the sqlx PgPool is pulled out of the
+# SeaORM connection). Version-locked to the sqlx SeaORM 1.1 already depends on.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "postgres",
+] }
+
+# Base64 for serializing opaque WebAuthn registration/auth state across the
+# (frontend-phase) wire, and for any opaque-blob handling at this boundary.
+base64 = "0.22"
 
 # The MockDatabase driver (sea_orm::MockDatabase) is used only in unit tests.
 # Adding `mock` here enables it for the test build without touching the
@@ -59,3 +106,8 @@ sea-orm = { workspace = true, features = [
 # DATABASE_URL and no-op in CI until Neon is provisioned (SPEC §12).
 [dev-dependencies]
 sea-orm = { workspace = true, features = ["mock"] }
+# The AuthedUser-gate harness drives the router via tower's oneshot and an
+# in-memory session store (no Postgres needed for the gate test).
+tower = { version = "0.5", features = ["util"] }
+tower-sessions = { version = "0.14", features = ["memory-store"] }
+async-trait = { workspace = true }
