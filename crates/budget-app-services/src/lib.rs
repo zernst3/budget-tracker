@@ -14,6 +14,7 @@ pub mod error;
 pub mod fund;
 pub mod income;
 pub mod month_lifecycle;
+pub mod onboarding;
 pub mod plaid_sync;
 
 pub use auth::AuthService;
@@ -24,4 +25,8 @@ pub use income::{
     IncomeSurplusRouting, SemimonthlyFixedExpectation,
 };
 pub use month_lifecycle::{MonthLifecycleService, net_leftover};
+pub use onboarding::{
+    BufferOpeningBalance, CategoryOpeningCharge, OnboardingInput, OnboardingReport,
+    OnboardingService, opening_charge_id, opening_other_id,
+};
 pub use plaid_sync::PlaidSyncService;

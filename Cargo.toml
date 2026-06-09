@@ -41,7 +41,11 @@ chrono = { version = "0.4", features = ["serde"] }
 # ARCH-UTC-TIMESTAMPS-1). The crate carries the IANA tz database; the domain
 # stays UTC and only the service layer converts at the membership boundary.
 chrono-tz = "0.10"
-uuid = { version = "1.10", features = ["v4", "serde"] }
+# v5 (name-based, SHA-1) backs deterministic opening-row identities for
+# re-runnable onboarding seeding (BUDGET-CUTOVER-1, step 9): an opening charge /
+# balance row's id is a stable function of (user, category/fund, day-0 kind), so
+# re-running the seed upserts the same row rather than duplicating it.
+uuid = { version = "1.10", features = ["v4", "v5", "serde"] }
 
 # Short-ID generation (10-char Base62), mirroring the Agora DOMAIN-9 pattern.
 nanoid = "0.4"
