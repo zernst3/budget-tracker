@@ -199,6 +199,8 @@ impl FundService {
             is_fund_draw: false,
             matched_transaction_id: None,
             comment: None,
+            is_transfer: false,
+            plaid_category: None,
             created_at: now,
             updated_at: now,
         };
@@ -536,6 +538,8 @@ impl FundService {
             is_fund_draw: false,
             matched_transaction_id: None,
             comment: None,
+            is_transfer: false,
+            plaid_category: None,
             created_at: now,
             updated_at: now,
         };
@@ -627,6 +631,8 @@ impl FundService {
             is_fund_draw: false,
             matched_transaction_id: None,
             comment: None,
+            is_transfer: false,
+            plaid_category: None,
             created_at: now,
             updated_at: now,
         };
@@ -951,6 +957,8 @@ fn purchase_txn(
         is_fund_draw,
         matched_transaction_id: None,
         comment: None,
+        is_transfer: false,
+        plaid_category: None,
         created_at: now,
         updated_at: now,
     }

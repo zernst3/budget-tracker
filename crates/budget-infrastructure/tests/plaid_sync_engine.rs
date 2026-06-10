@@ -445,6 +445,7 @@ fn plaid_txn(id: &str, amount: Decimal, d: NaiveDate, pending: bool) -> PlaidTra
         name: format!("merchant-{id}"),
         pending,
         pending_transaction_id: None,
+        plaid_category: None,
     }
 }
 
@@ -856,6 +857,8 @@ fn matched_placeholder(user_id: UserId, matched: TransactionId) -> Transaction {
         is_fund_draw: false,
         matched_transaction_id: Some(matched),
         comment: None,
+        is_transfer: false,
+        plaid_category: None,
         created_at: now,
         updated_at: now,
     }

@@ -83,10 +83,10 @@ pub fn fixed_category_spent(
     }
 }
 
-/// `BUDGET-FUND-EARMARK-1` + `BUDGET-NO-DOUBLE-CHARGE-1` (D6 Model A / D7) — the
-/// single predicate deciding whether a transaction contributes to a month's
-/// expense remaining sum (the `Σ(expense category remaining)` term of the `D5`
-/// net, `SPEC §4.3`).
+/// `BUDGET-FUND-EARMARK-1` + `BUDGET-NO-DOUBLE-CHARGE-1` + `BUDGET-TRANSFER-EXCLUDE-1`
+/// (D6 Model A / D7 / D10) — the single predicate deciding whether a transaction
+/// contributes to a month's expense remaining sum (the `Σ(expense category
+/// remaining)` term of the `D5` net, `SPEC §4.3`).
 ///
 /// A transaction's signed `amount` flows into the month-expense sum iff ALL of:
 ///   - it counts in budget by status ([`counts_in_budget`],
@@ -97,13 +97,20 @@ pub fn fixed_category_spent(
 ///     payout). Under D6 Model A the money was already expensed at CONTRIBUTION
 ///     time, so the later draw is a fund-draw, not a re-charged budget expense
 ///     (`BUDGET-NO-DOUBLE-CHARGE-1`); excluding it here keeps the dollar counted
-///     exactly once, and
+///     exactly once,
 ///   - it is **not** a buffer-financed full-price purchase
 ///     (`buffer_financed_txn_ids`). That row posts for TRACKING only with ZERO
 ///     month-budget impact: the buffer draw fronts the cash, and the *budget*
 ///     effect is the compulsory installments (ordinary expenses) flowing back into
 ///     the buffer (`SPEC §4.9` D7). Excluding the full price here is exactly what
-///     stops it from blowing up its month while the installments are counted.
+///     stops it from blowing up its month while the installments are counted, and
+///   - it is **not** an internal transfer (`is_transfer = true`,
+///     `BUDGET-TRANSFER-EXCLUDE-1`, `SPEC §4.11` D10). Both legs of a credit-card
+///     payment or checking↔savings transfer are TRACKED but EXCLUDED from budget
+///     math. This is the single domain predicate that enforces the exclusion for
+///     both the funding-account outflow and the destination-account inflow; every
+///     SQL aggregate that mirrors the category-spent / month-net calculation must
+///     also apply `AND is_transfer = false`.
 ///
 /// **D6 Model A (`BUDGET-FUND-EARMARK-1`).** A fund CONTRIBUTION — sinking accrual,
 /// surplus contribution, buffer-repayment installment — is a manual Other-bucket
@@ -140,6 +147,50 @@ pub fn counts_in_month_expense_remaining(
         && !txn.is_income()
         && !txn.is_fund_draw
         && !buffer_financed_txn_ids.contains(&txn.id)
+        // BUDGET-TRANSFER-EXCLUDE-1 / SPEC §4.11 D10: an internal account movement
+        // (credit-card payment, checking↔savings transfer) is excluded from budget
+        // math on BOTH legs. This is the single domain-level enforcement point;
+        // SQL aggregates mirror it with `AND is_transfer = false`.
+        && !txn.is_transfer
+}
+
+/// `BUDGET-TRANSFER-EXCLUDE-1` / `SPEC §4.11` D10 — pure suggestion predicate:
+/// does Plaid's `personal_finance_category.detailed` string indicate an internal
+/// account movement (a credit-card payment or an account-to-account transfer)?
+///
+/// This drives the triage AUTO-SUGGEST **only**. When it returns `true`, the triage
+/// UI pre-selects the Transfer treatment for the user to confirm; it NEVER
+/// auto-applies `is_transfer` (a Plaid mis-tag must not silently mutate budget math —
+/// the user confirms or overrides). The match is exact (uppercase Plaid taxonomy
+/// values), case-insensitive for safety against minor casing drift:
+///   - `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT` — paying a linked credit card from
+///     checking (the canonical double-count case, `SPEC §4.11`),
+///   - `TRANSFER_OUT` — an outflow account-to-account transfer (e.g. checking →
+///     savings; the funding leg),
+///   - `TRANSFER_IN` — an inflow account-to-account transfer (the destination leg),
+///
+/// plus the obvious credit-card-payment variants Plaid emits under the
+/// `LOAN_PAYMENTS_*` and `TRANSFER_*` prefixes (`TRANSFER_OUT_*` /
+/// `TRANSFER_IN_*` detailed leaves, and any `*_CREDIT_CARD_PAYMENT`). Ordinary
+/// spending categories (`GENERAL_MERCHANDISE`, `FOOD_AND_DRINK`, …) return `false`.
+///
+/// Pure + total: no I/O, no allocation beyond the uppercase normalization; it is a
+/// domain fact, unit-tested below.
+#[must_use]
+pub fn plaid_category_suggests_transfer(detailed: &str) -> bool {
+    let d = detailed.trim().to_ascii_uppercase();
+    // Credit-card payment (the §4.11 double-count case) under any LOAN_PAYMENTS
+    // detailed leaf that names a card payment.
+    if d == "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT" || d.ends_with("_CREDIT_CARD_PAYMENT") {
+        return true;
+    }
+    // Account-to-account transfers: both legs (OUT = funding, IN = destination),
+    // including Plaid's more specific detailed leaves (TRANSFER_OUT_ACCOUNT_TRANSFER,
+    // TRANSFER_IN_ACCOUNT_TRANSFER, etc.).
+    d == "TRANSFER_OUT"
+        || d == "TRANSFER_IN"
+        || d.starts_with("TRANSFER_OUT_")
+        || d.starts_with("TRANSFER_IN_")
 }
 
 /// `BUDGET-NO-DOUBLE-CHARGE-1` / `SPEC §4.5` — the per-category envelope spent
@@ -251,7 +302,7 @@ mod tests {
             month_id: MonthId::generate(),
             category_id,
             account_id: None,
-            date: NaiveDate::from_ymd_opt(2026, 6, 8).unwrap_or(NaiveDate::MIN),
+            date: NaiveDate::from_ymd_opt(2026, 6, 9).unwrap_or(NaiveDate::MIN),
             amount,
             description: "t".to_owned(),
             source: TransactionSource::Manual,
@@ -262,6 +313,9 @@ mod tests {
             is_fund_draw,
             matched_transaction_id: None,
             comment: None,
+            // BUDGET-TRANSFER-EXCLUDE-1: default false — not a transfer.
+            is_transfer: false,
+            plaid_category: None,
             created_at: now,
             updated_at: now,
         }
@@ -308,6 +362,189 @@ mod tests {
         let cat = CategoryId::generate();
         let e = expense(Money::from_minor(-2_500), Some(cat), false);
         assert!(counts_in_month_expense_remaining(&e, &[], &[]));
+    }
+
+    // -- BUDGET-TRANSFER-EXCLUDE-1 / SPEC §4.11 D10 --------------------------
+
+    #[test]
+    fn transfer_flagged_transaction_is_excluded_from_expense_remaining() {
+        // BUDGET-TRANSFER-EXCLUDE-1: a credit-card payment (is_transfer=true) on
+        // the checking account is excluded from budget math — even when settled and
+        // not a fund draw — so counting both legs doesn't double-count.
+        let cat = CategoryId::generate();
+        let mut outflow = expense(Money::from_minor(-50_000), Some(cat), false);
+        outflow.is_transfer = true;
+        assert!(
+            !counts_in_month_expense_remaining(&outflow, &[], &[]),
+            "an is_transfer=true outflow (checking withdrawal) must be excluded"
+        );
+    }
+
+    #[test]
+    fn transfer_inflow_leg_is_also_excluded() {
+        // BUDGET-TRANSFER-EXCLUDE-1: the card-side payment CREDIT (positive amount,
+        // is_transfer=true) must also be excluded — it would otherwise wrongly
+        // offset expenses in the month net.
+        let cat = CategoryId::generate();
+        let mut inflow = expense(Money::from_minor(50_000), Some(cat), false);
+        inflow.is_transfer = true;
+        // is_income() is false (income_kind is None) — this row is NOT income;
+        // it is a transfer that happens to have a positive amount.
+        assert!(
+            !inflow.is_income(),
+            "the card-payment credit is not flagged as income"
+        );
+        assert!(
+            !counts_in_month_expense_remaining(&inflow, &[], &[]),
+            "an is_transfer=true inflow (card payment credit) must be excluded"
+        );
+    }
+
+    #[test]
+    fn non_transfer_flag_does_not_change_ordinary_expense_inclusion() {
+        // Sanity: is_transfer=false (the default) does not accidentally exclude a
+        // normal expense — only the flag itself triggers the exclusion.
+        let cat = CategoryId::generate();
+        let normal = expense(Money::from_minor(-8_000), Some(cat), false);
+        assert!(
+            !normal.is_transfer,
+            "default expense must not carry is_transfer"
+        );
+        assert!(
+            counts_in_month_expense_remaining(&normal, &[], &[]),
+            "a normal expense with is_transfer=false must still count"
+        );
+    }
+
+    #[test]
+    fn double_count_scenario_month_expense_sum_reflects_only_the_charge() {
+        // SPEC §4.11 D10 — the canonical credit-card-payment double-count case.
+        // Three rows in a month with both a card and checking linked:
+        //   1. card CHARGE  -$84.30  (a real expense — COUNTS),
+        //   2. checking card-PAYMENT  -$500  (is_transfer — the withdrawal that pays
+        //      the card; EXCLUDED so it does not double-count the charge),
+        //   3. card-side payment CREDIT  +$500  (is_transfer — the inflow on the card;
+        //      EXCLUDED so it does not wrongly offset expenses).
+        // The month expense sum (Σ over counting rows of the signed amount) must be
+        // EXACTLY the charge, -$84.30 — never the payment, never the credit.
+        let cat = CategoryId::generate();
+
+        let charge = expense(Money::from_minor(-8_430), Some(cat), false);
+
+        let mut checking_payment = expense(Money::from_minor(-50_000), Some(cat), false);
+        checking_payment.is_transfer = true; // leg 1: the funding outflow
+
+        let mut card_credit = expense(Money::from_minor(50_000), Some(cat), false);
+        card_credit.is_transfer = true; // leg 2: the destination inflow
+
+        let rows = [
+            charge.clone(),
+            checking_payment.clone(),
+            card_credit.clone(),
+        ];
+
+        // Independent rust_decimal oracle: sum the signed amounts of only the rows the
+        // predicate counts. We re-derive the expected total WITHOUT trusting the
+        // predicate to also do the summing.
+        let counted: rust_decimal::Decimal = rows
+            .iter()
+            .filter(|t| counts_in_month_expense_remaining(t, &[], &[]))
+            .map(|t| t.amount.as_decimal())
+            .sum();
+
+        assert_eq!(
+            counted,
+            rust_decimal::Decimal::new(-8_430, 2),
+            "month expense sum must be EXACTLY the -$84.30 charge — neither leg of the \
+             card payment may leak in"
+        );
+
+        // Spell out each leg's verdict for clarity / regression localization.
+        assert!(
+            counts_in_month_expense_remaining(&charge, &[], &[]),
+            "the real card charge counts"
+        );
+        assert!(
+            !counts_in_month_expense_remaining(&checking_payment, &[], &[]),
+            "the checking card-payment outflow (is_transfer) is excluded"
+        );
+        assert!(
+            !counts_in_month_expense_remaining(&card_credit, &[], &[]),
+            "the card-side payment credit (is_transfer) is excluded"
+        );
+
+        // The double-count bug is most visible PER LEG: the checking card-payment
+        // (-$500), if counted, is a phantom $500 expense on top of the real charge.
+        // The two equal-and-opposite legs only happen to cancel when BOTH land in the
+        // same month; in a real ledger the checking outflow and the card credit can
+        // fall in different months / be matched independently, so each leg must be
+        // excluded on its OWN, not rely on cancellation. Prove the funding leg alone
+        // would corrupt the sum if it were counted:
+        let charge_plus_payment_if_payment_counted: rust_decimal::Decimal =
+            charge.amount.as_decimal() + checking_payment.amount.as_decimal();
+        assert_eq!(
+            charge_plus_payment_if_payment_counted,
+            rust_decimal::Decimal::new(-58_430, 2),
+            "if the checking card-payment leg counted, the sum would be a wrong -$584.30"
+        );
+        assert_ne!(
+            counted, charge_plus_payment_if_payment_counted,
+            "the exclusion must keep the phantom -$500 payment leg out of the sum"
+        );
+    }
+
+    #[test]
+    fn positive_inflow_transfer_is_not_counted_as_income() {
+        // SPEC §4.11 D10 — a positive-amount transfer (the card-side payment credit,
+        // or an inbound checking↔savings transfer) is NOT income: income_kind is
+        // None, so is_income() is false, and the is_transfer flag excludes it from the
+        // expense-remaining sum. It can therefore never offset expenses or be netted
+        // as an income inflow.
+        let inflow = {
+            let mut t = expense(Money::from_minor(120_000), None, false); // +$1,200
+            t.is_transfer = true;
+            t
+        };
+        assert!(!inflow.is_income(), "a transfer inflow is not income");
+        assert!(
+            !counts_in_month_expense_remaining(&inflow, &[], &[]),
+            "a positive-inflow transfer must be excluded (never counted as income)"
+        );
+    }
+
+    #[test]
+    fn plaid_category_suggests_transfer_maps_the_three_categories_and_rejects_ordinary() {
+        // SPEC §4.11 D10 — the three Plaid taxonomy values that pre-select Transfer.
+        assert!(plaid_category_suggests_transfer(
+            "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"
+        ));
+        assert!(plaid_category_suggests_transfer("TRANSFER_OUT"));
+        assert!(plaid_category_suggests_transfer("TRANSFER_IN"));
+
+        // Obvious card-payment / transfer variants Plaid emits as detailed leaves.
+        assert!(plaid_category_suggests_transfer(
+            "TRANSFER_OUT_ACCOUNT_TRANSFER"
+        ));
+        assert!(plaid_category_suggests_transfer(
+            "TRANSFER_IN_ACCOUNT_TRANSFER"
+        ));
+        // Case / whitespace robustness (defensive against minor casing drift).
+        assert!(plaid_category_suggests_transfer(
+            "  loan_payments_credit_card_payment  "
+        ));
+
+        // Ordinary spending categories must NOT suggest a transfer.
+        assert!(!plaid_category_suggests_transfer("GENERAL_MERCHANDISE"));
+        assert!(!plaid_category_suggests_transfer("FOOD_AND_DRINK"));
+        assert!(!plaid_category_suggests_transfer("RENT_AND_UTILITIES"));
+        // A loan payment that is NOT a card payment (e.g. a mortgage) is real spending,
+        // not an internal transfer — it must NOT suggest Transfer.
+        assert!(!plaid_category_suggests_transfer(
+            "LOAN_PAYMENTS_MORTGAGE_PAYMENT"
+        ));
+        // Empty / junk.
+        assert!(!plaid_category_suggests_transfer(""));
+        assert!(!plaid_category_suggests_transfer("TRANSFERABLE"));
     }
 
     #[test]

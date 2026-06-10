@@ -193,6 +193,17 @@ pub struct PlaidTransaction {
     /// `modified` carrying the original pending row's id here, so the two are
     /// linked (`SPEC §6` pending->settled transition).
     pub pending_transaction_id: Option<String>,
+    /// Plaid `personal_finance_category.detailed` string, if provided
+    /// (`SPEC §4.11`, D10, `BUDGET-TRANSFER-EXCLUDE-1`).
+    ///
+    /// Examples: `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`, `TRANSFER_OUT`,
+    /// `TRANSFER_IN`. Captured at ingest and stored in
+    /// `transactions.plaid_category` to drive the triage Transfer AUTO-SUGGEST.
+    /// `None` when Plaid did not supply the field (older API responses, some
+    /// account types). Never used for budget math — the flag
+    /// `transactions.is_transfer` (set explicitly at triage) is the authoritative
+    /// exclusion signal.
+    pub plaid_category: Option<String>,
 }
 
 /// A Plaid account as reported alongside a sync (for naming, `SPEC §6`).

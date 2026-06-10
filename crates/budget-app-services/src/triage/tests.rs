@@ -264,8 +264,10 @@ impl TransactionRepository for FakeTransactionRepo {
         &self,
         user_id: UserId,
     ) -> Result<Vec<Transaction>, RepositoryError> {
-        // The real query: settled + uncategorized + this user, oldest first. The
-        // `Settled` filter is what excludes Plaid `pending` rows (SPEC §4.4).
+        // The real query (SPEC §7 / §4.11): settled + uncategorized + NOT a transfer
+        // + this user, oldest first. The `Settled` filter excludes Plaid `pending`
+        // rows (SPEC §4.4); the `!is_transfer` filter is what lets a triaged transfer
+        // LEAVE the inbox via is_transfer=true (BUDGET-TRANSFER-EXCLUDE-1).
         let store = self.store.lock().map_err(poisoned)?;
         let mut rows: Vec<Transaction> = store
             .txns
@@ -274,6 +276,7 @@ impl TransactionRepository for FakeTransactionRepo {
                 t.user_id == user_id
                     && t.status == TransactionStatus::Settled
                     && t.category_id.is_none()
+                    && !t.is_transfer
             })
             .cloned()
             .collect();
@@ -489,6 +492,8 @@ fn settled_uncategorized(user_id: UserId, month_id: MonthId, amount: Money) -> T
         is_fund_draw: false,
         matched_transaction_id: None,
         comment: None,
+        is_transfer: false,
+        plaid_category: None,
         created_at: now,
         updated_at: now,
     }
@@ -555,7 +560,7 @@ async fn pay_directly_is_a_plain_counted_expense_no_fund_touched() {
         .triage(
             TriageInput {
                 transaction_id: txn_id,
-                category_id: cat,
+                category_id: Some(cat),
                 comment: Some("lunch".to_owned()),
                 treatment: Treatment::PayDirectly,
             },
@@ -610,7 +615,7 @@ async fn pay_from_savings_draws_the_fund_once_and_excludes_from_net() {
         .triage(
             TriageInput {
                 transaction_id: txn_id,
-                category_id: cat,
+                category_id: Some(cat),
                 comment: None,
                 treatment: Treatment::PayFromSavings { fund_id },
             },
@@ -661,7 +666,7 @@ async fn spread_over_months_posts_zero_net_month_impact_plus_an_obligation() {
         .triage(
             TriageInput {
                 transaction_id: txn_id,
-                category_id: cat,
+                category_id: Some(cat),
                 comment: Some("MacBook".to_owned()),
                 treatment: Treatment::SpreadOverMonths { fund_id, months: 6 },
             },
@@ -741,7 +746,7 @@ async fn spread_over_months_final_installment_absorbs_the_rounding_remainder() {
         .triage(
             TriageInput {
                 transaction_id: txn_id,
-                category_id: CategoryId::generate(),
+                category_id: Some(CategoryId::generate()),
                 comment: None,
                 treatment: Treatment::SpreadOverMonths { fund_id, months: 3 },
             },
@@ -800,7 +805,7 @@ async fn triaging_a_plaid_pending_charge_is_rejected_and_never_mutates() {
         .triage(
             TriageInput {
                 transaction_id: pending_id,
-                category_id: CategoryId::generate(),
+                category_id: Some(CategoryId::generate()),
                 comment: None,
                 treatment: Treatment::PayDirectly,
             },
@@ -837,7 +842,7 @@ async fn triaged_row_leaves_the_inbox() {
         .triage(
             TriageInput {
                 transaction_id: txn_id,
-                category_id: CategoryId::generate(),
+                category_id: Some(CategoryId::generate()),
                 comment: None,
                 treatment: Treatment::PayDirectly,
             },
@@ -864,7 +869,7 @@ async fn double_triage_is_rejected() {
         .triage(
             TriageInput {
                 transaction_id: txn_id,
-                category_id: CategoryId::generate(),
+                category_id: Some(CategoryId::generate()),
                 comment: None,
                 treatment: Treatment::PayDirectly,
             },
@@ -879,7 +884,7 @@ async fn double_triage_is_rejected() {
         .triage(
             TriageInput {
                 transaction_id: txn_id,
-                category_id: CategoryId::generate(),
+                category_id: Some(CategoryId::generate()),
                 comment: None,
                 treatment: Treatment::PayDirectly,
             },
@@ -908,7 +913,7 @@ async fn spread_over_months_requires_a_buffer_fund() {
         .triage(
             TriageInput {
                 transaction_id: txn_id,
-                category_id: CategoryId::generate(),
+                category_id: Some(CategoryId::generate()),
                 comment: None,
                 treatment: Treatment::SpreadOverMonths { fund_id, months: 4 },
             },
@@ -922,4 +927,199 @@ async fn spread_over_months_requires_a_buffer_fund() {
     assert!(h.funds.obligations().is_empty());
     let after = h.transactions.get(txn_id);
     assert!(after.category_id.is_none(), "row not mutated on rejection");
+}
+
+// ---------------------------------------------------------------------------
+// 6. Transfer treatment — SPEC §4.11 D10 / BUDGET-TRANSFER-EXCLUDE-1
+// ---------------------------------------------------------------------------
+
+/// A settled, uncategorized bank charge carrying a Plaid `plaid_category` (so the
+/// suggestion can be derived) — an inbox row that should auto-suggest Transfer.
+fn settled_with_plaid_category(
+    user_id: UserId,
+    month_id: MonthId,
+    amount: Money,
+    plaid_category: &str,
+) -> Transaction {
+    let mut t = settled_uncategorized(user_id, month_id, amount);
+    t.plaid_category = Some(plaid_category.to_owned());
+    t
+}
+
+#[tokio::test]
+async fn transfer_treatment_sets_is_transfer_assigns_no_category_and_leaves_inbox() {
+    // SPEC §4.11 D10 / property (d): triaging Transfer sets is_transfer=true, assigns
+    // NO category, touches NO fund/obligation, and removes the row from the inbox.
+    let h = harness();
+    // A -$500 checking withdrawal that pays the card — an internal transfer.
+    let txn = settled_with_plaid_category(
+        h.user_id,
+        h.month_id,
+        Money::from_minor(-50_000),
+        "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT",
+    );
+    let txn_id = txn.id;
+    h.transactions.insert(txn);
+
+    // It is in the inbox BEFORE triage.
+    let before = h.triage.pending_inbox(h.user_id).await.expect("inbox ok");
+    assert!(
+        before.iter().any(|p| p.id == txn_id),
+        "the transfer row is in the inbox before triage"
+    );
+    // And the inbox row carries the auto-suggest (property (c) at the DTO level).
+    assert!(
+        before
+            .iter()
+            .find(|p| p.id == txn_id)
+            .expect("row present")
+            .suggested_transfer,
+        "a LOAN_PAYMENTS_CREDIT_CARD_PAYMENT row suggests Transfer"
+    );
+
+    let out = h
+        .triage
+        .triage(
+            TriageInput {
+                transaction_id: txn_id,
+                category_id: None, // Transfer requires NO category
+                comment: Some("paid Amex".to_owned()),
+                treatment: Treatment::Transfer,
+            },
+            Utc::now(),
+        )
+        .await
+        .expect("transfer triage ok");
+    assert_eq!(out.obligation_id, None, "Transfer creates no obligation");
+
+    let saved = h.transactions.get(txn_id);
+    assert!(saved.is_transfer, "is_transfer set to true");
+    assert_eq!(saved.category_id, None, "Transfer assigns NO category");
+    assert!(!saved.is_fund_draw, "Transfer is not a fund draw");
+    assert_eq!(saved.amount, Money::from_minor(-50_000), "amount unchanged");
+    assert_eq!(saved.comment.as_deref(), Some("paid Amex"));
+
+    // It LEFT the inbox — via is_transfer=true, not a category.
+    let after = h.triage.pending_inbox(h.user_id).await.expect("inbox ok");
+    assert!(
+        after.iter().all(|p| p.id != txn_id),
+        "the triaged transfer no longer appears in the inbox"
+    );
+
+    // No fund / obligation touched.
+    assert!(h.funds.obligations().is_empty());
+    assert!(h.funds.store.lock().unwrap().funds.is_empty());
+
+    // SQL-aggregate mirror (property (b)): the saved row is excluded from the month
+    // expense sum by the same predicate the SQL aggregates mirror with
+    // `AND is_transfer = false`.
+    assert!(
+        !counts_in_month_expense_remaining(&saved, &[], &[]),
+        "the triaged transfer is excluded from budget math"
+    );
+    assert!(
+        !oracle_counts_with_transfer(&saved, &[]),
+        "independent oracle agrees the transfer is excluded"
+    );
+}
+
+#[tokio::test]
+async fn transfer_inflow_leg_is_triaged_and_excluded_not_counted_as_income() {
+    // SPEC §4.11 D10 / property (e): the card-side payment CREDIT (a POSITIVE amount)
+    // triaged as a Transfer is excluded — never counted as income. is_income() stays
+    // false (income_kind is None) and is_transfer excludes it.
+    let h = harness();
+    let credit = settled_with_plaid_category(
+        h.user_id,
+        h.month_id,
+        Money::from_minor(50_000), // +$500 inbound payment credit
+        "TRANSFER_IN",
+    );
+    let txn_id = credit.id;
+    h.transactions.insert(credit);
+
+    h.triage
+        .triage(
+            TriageInput {
+                transaction_id: txn_id,
+                category_id: None,
+                comment: None,
+                treatment: Treatment::Transfer,
+            },
+            Utc::now(),
+        )
+        .await
+        .expect("inflow transfer triage ok");
+
+    let saved = h.transactions.get(txn_id);
+    assert!(saved.is_transfer);
+    assert!(!saved.is_income(), "a transfer inflow is not income");
+    assert!(
+        !counts_in_month_expense_remaining(&saved, &[], &[]),
+        "the positive-inflow transfer is excluded (not counted as income)"
+    );
+}
+
+#[tokio::test]
+async fn re_triaging_an_already_transfer_row_is_rejected() {
+    // Guard symmetry: a row already flagged is_transfer has left the inbox; a second
+    // triage (of any treatment) is rejected, exactly like re-triaging a categorized
+    // row — and nothing is mutated.
+    let h = harness();
+    let mut txn = settled_uncategorized(h.user_id, h.month_id, Money::from_minor(-50_000));
+    txn.is_transfer = true; // already a transfer
+    let txn_id = txn.id;
+    h.transactions.insert(txn);
+
+    let err = h
+        .triage
+        .triage(
+            TriageInput {
+                transaction_id: txn_id,
+                category_id: Some(CategoryId::generate()),
+                comment: None,
+                treatment: Treatment::PayDirectly,
+            },
+            Utc::now(),
+        )
+        .await
+        .expect_err("an already-transfer row cannot be re-triaged");
+    assert!(matches!(err, DomainError::IllegalState(_)));
+
+    // Untouched: still a transfer, still no category.
+    let after = h.transactions.get(txn_id);
+    assert!(after.is_transfer, "still a transfer");
+    assert!(after.category_id.is_none(), "row not mutated on rejection");
+}
+
+#[tokio::test]
+async fn ordinary_plaid_category_does_not_suggest_transfer() {
+    // SPEC §4.11 D10 / property (c) negative case: an ordinary Plaid category
+    // (GENERAL_MERCHANDISE) does NOT pre-select Transfer in the inbox DTO.
+    let h = harness();
+    let txn = settled_with_plaid_category(
+        h.user_id,
+        h.month_id,
+        Money::from_minor(-4_250),
+        "GENERAL_MERCHANDISE",
+    );
+    let txn_id = txn.id;
+    h.transactions.insert(txn);
+
+    let inbox = h.triage.pending_inbox(h.user_id).await.expect("inbox ok");
+    let row = inbox.iter().find(|p| p.id == txn_id).expect("row present");
+    assert!(
+        !row.suggested_transfer,
+        "GENERAL_MERCHANDISE must NOT suggest a transfer"
+    );
+}
+
+/// Independent oracle including the transfer exclusion (extends [`oracle_counts`]
+/// with the `is_transfer` term) — re-derived inline so the assertion does not
+/// tautologically green against the build's own predicate.
+fn oracle_counts_with_transfer(t: &Transaction, buffer_financed_ids: &[TransactionId]) -> bool {
+    if t.is_transfer {
+        return false;
+    }
+    oracle_counts(t, buffer_financed_ids)
 }

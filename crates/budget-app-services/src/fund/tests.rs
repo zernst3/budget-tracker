@@ -950,6 +950,8 @@ async fn tag_sinking_payout_draws_reserve_and_resets_clock_forward() {
         is_fund_draw: false,
         matched_transaction_id: None,
         comment: None,
+        is_transfer: false,
+        plaid_category: None,
         created_at: now(),
         updated_at: now(),
     };

@@ -9,6 +9,7 @@
 //!   - Rollover system transactions (`is_rollover = true`, `BUDGET-ROLLOVER-INTEGRITY-1`)
 //!   - Expected expense placeholders (`status = 'expected'`, SPEC §4.10)
 //!   - Income flows (`income_kind` non-null, SPEC §4.8)
+//!   - Internal-transfer records (`is_transfer = true`, `BUDGET-TRANSFER-EXCLUDE-1`, SPEC §4.11)
 //!
 //! `amount` is signed: **negative = expense, positive = inflow** (internal convention).
 //! Plaid amounts are flipped once at the mapper boundary (`BUDGET-PLAID-SIGN-1`).
@@ -24,6 +25,18 @@
 //!
 //! Per ENTITIES-4 the parent-side `has_many` declarations for both `months` and
 //! `categories` point to this entity.
+//!
+//! `is_transfer` (`BUDGET-TRANSFER-EXCLUDE-1`, migration m0006): internal account movement
+//! flag. Set at triage (the 4th Transfer treatment); never auto-applied. Both legs of an
+//! internal transfer (the funding-account outflow and the destination-account inflow) carry
+//! this flag. Excluded from all budget math via the single
+//! `counts_in_month_expense_remaining` predicate (+ its SQL mirrors).
+//!
+//! `plaid_category` (migration m0006): Plaid `personal_finance_category.detailed` string
+//! (e.g. `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`, `TRANSFER_OUT`, `TRANSFER_IN`), captured at
+//! ingest. Drives the triage Transfer AUTO-SUGGEST only; never used in budget math.
+//! Per ENTITIES-7: no `#[sea_orm(unique)]` annotation — this is a nullable audit column,
+//! not a unique constraint.
 
 use sea_orm::entity::prelude::*;
 
@@ -112,6 +125,18 @@ pub struct Model {
     /// Distinct from `description` (the Plaid/merchant string). NULL = no note.
     /// Inline-editable in the ledger; also settable during Pending triage.
     pub comment: Option<String>,
+    /// Internal account movement flag (`SPEC §4.11`, D10, migration m0006,
+    /// `BUDGET-TRANSFER-EXCLUDE-1`). `true` = this row is a credit-card payment or
+    /// checking↔savings transfer — tracked but EXCLUDED from budget math on BOTH
+    /// legs. Set only at triage (the 4th Transfer treatment); never auto-applied.
+    /// All existing rows default to `false` (not a transfer).
+    pub is_transfer: bool,
+    /// Plaid `personal_finance_category.detailed` string captured at ingest
+    /// (`SPEC §4.11`, D10, migration m0006). Examples:
+    /// `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`, `TRANSFER_OUT`, `TRANSFER_IN`.
+    /// Drives the triage Transfer AUTO-SUGGEST only; `NULL` for non-Plaid rows
+    /// and rows where Plaid did not supply a category.
+    pub plaid_category: Option<String>,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
 }

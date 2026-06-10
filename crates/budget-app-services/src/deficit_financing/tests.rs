@@ -763,6 +763,8 @@ fn expense(
         is_fund_draw: false,
         matched_transaction_id: None,
         comment: None,
+        is_transfer: false,
+        plaid_category: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }

@@ -66,6 +66,30 @@ pub(crate) struct WireTransaction {
     pub(crate) pending: bool,
     #[serde(default)]
     pub(crate) pending_transaction_id: Option<String>,
+    /// Plaid `personal_finance_category` object (`SPEC §4.11`, D10).
+    ///
+    /// Tolerant of absence: Plaid only includes this field when the
+    /// `transactions` product includes enhanced categorization.  `#[serde(default)]`
+    /// maps both a missing key and an explicit JSON `null` to `None`, so the DTO
+    /// never fails to deserialize if the field is absent or null.
+    #[serde(default)]
+    pub(crate) personal_finance_category: Option<WirePersonalFinanceCategory>,
+}
+
+/// The `personal_finance_category` sub-object that Plaid may include on a
+/// transaction.  We capture only `detailed` (e.g.
+/// `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`, `TRANSFER_OUT`, `TRANSFER_IN`) because
+/// that is the field that drives the transfer triage AUTO-SUGGEST
+/// (`SPEC §4.11`, `BUDGET-TRANSFER-EXCLUDE-1`).  The other fields
+/// (`primary`, `confidence_level`) are intentionally ignored.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct WirePersonalFinanceCategory {
+    /// Detailed Plaid category code.  `None` when the key is absent or null.
+    #[serde(default)]
+    pub(crate) detailed: Option<String>,
+    // `primary` and `confidence_level` are present in the Plaid schema but
+    // unused by this application; serde silently ignores unknown fields by
+    // default, so no explicit skip annotation is needed.
 }
 
 impl From<WireTransaction> for PlaidTransaction {
@@ -78,6 +102,11 @@ impl From<WireTransaction> for PlaidTransaction {
             name: w.name,
             pending: w.pending,
             pending_transaction_id: w.pending_transaction_id,
+            // Flatten the nested `personal_finance_category.detailed` into the
+            // single `plaid_category` field the domain DTO carries.  Tolerant of
+            // any combination of absent object / null object / absent detailed
+            // field / null detailed value — all resolve to `None`.
+            plaid_category: w.personal_finance_category.and_then(|pfc| pfc.detailed),
         }
     }
 }

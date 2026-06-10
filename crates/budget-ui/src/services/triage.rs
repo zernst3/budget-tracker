@@ -59,6 +59,12 @@ pub struct PendingRowDto {
     pub description: String,
     /// The linked account id, if any (`None` for a manual/unlinked row).
     pub account_id: Option<String>,
+    /// `BUDGET-TRANSFER-EXCLUDE-1` / `SPEC §4.11` D10 — the transfer AUTO-SUGGEST.
+    /// `true` when Plaid's captured category indicates a credit-card payment or an
+    /// account-to-account transfer; the UI pre-selects the Transfer treatment for the
+    /// user to confirm. SUGGESTION ONLY — never auto-applied (the server never sets
+    /// `is_transfer` from it).
+    pub suggested_transfer: bool,
 }
 
 /// One selectable fund for the triage treatment pickers (`SPEC §4.9`). Surfaced
@@ -81,8 +87,8 @@ pub struct FundDto {
     pub balance: Money,
 }
 
-/// The treatment to apply at triage (`SPEC §7` / `§4.9`): exactly one of three
-/// paths. The wire shape carries the discriminant plus the path-specific
+/// The treatment to apply at triage (`SPEC §7` / `§4.9` / `§4.11`): exactly one of
+/// four paths. The wire shape carries the discriminant plus the path-specific
 /// parameters; the server fn maps it to the app-services
 /// [`budget_app_services::Treatment`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +110,11 @@ pub enum TreatmentDto {
     /// (c) Pay directly through the budget — a normal in-month expense (the
     /// DEFAULT).
     PayDirectly,
+    /// (d) Transfer / card payment — NOT an expense (`SPEC §4.11` D10,
+    /// `BUDGET-TRANSFER-EXCLUDE-1`). Sets `is_transfer = true` and removes the row
+    /// from the inbox without a category; no fund/obligation is touched. Carries no
+    /// parameters; `category_id` on the request is ignored for this treatment.
+    Transfer,
 }
 
 /// The input to one atomic triage (`SPEC §7`).
@@ -111,9 +122,11 @@ pub enum TreatmentDto {
 pub struct TriageRequestDto {
     /// The pending transaction to triage.
     pub transaction_id: String,
-    /// The category to assign (required — categorizing removes the row from the
-    /// inbox).
-    pub category_id: String,
+    /// The category to assign. Required for the three expense treatments
+    /// (categorizing removes the row from the inbox); `None` for
+    /// [`TreatmentDto::Transfer`], which removes the row via `is_transfer = true`
+    /// instead (`SPEC §4.11` D10).
+    pub category_id: Option<String>,
     /// An optional free-text comment (`transactions.comment`).
     pub comment: Option<String>,
     /// The single treatment to apply.
@@ -224,6 +237,10 @@ pub async fn get_pending_inbox() -> Result<Vec<PendingRowDto>, dioxus::prelude::
             amount: p.amount,
             description: p.description,
             account_id: p.account_id.map(|a| a.to_string()),
+            // SPEC §4.11 D10: pass the server-computed transfer suggestion through to
+            // the wire so the UI can pre-select the Transfer treatment (never the
+            // server auto-applying it).
+            suggested_transfer: p.suggested_transfer,
         })
         .collect())
 }
@@ -304,7 +321,6 @@ pub async fn triage_transaction(
     // Parse the wire ids into domain newtypes (a malformed id is a 400, never a
     // data reach).
     let transaction_id = TransactionId::new(parse_uuid(&request.transaction_id, "transaction_id")?);
-    let category_id = CategoryId::new(parse_uuid(&request.category_id, "category_id")?);
     let treatment = match request.treatment {
         TreatmentDto::PayDirectly => Treatment::PayDirectly,
         TreatmentDto::PayFromSavings { fund_id } => Treatment::PayFromSavings {
@@ -319,7 +335,22 @@ pub async fn triage_transaction(
                 months,
             }
         }
+        // SPEC §4.11 D10: Transfer takes no fund/category; the flag removes the row.
+        TreatmentDto::Transfer => Treatment::Transfer,
     };
+
+    // A category is required for the three expense treatments and ignored for
+    // Transfer (which leaves the inbox via is_transfer=true, SPEC §4.11). Parse it
+    // when present; the app-services triage enforces the per-treatment requirement.
+    let category_id = match &request.category_id {
+        Some(raw) => Some(CategoryId::new(parse_uuid(raw, "category_id")?)),
+        None => None,
+    };
+    if category_id.is_none() && treatment != Treatment::Transfer {
+        return Err(bad_request(
+            "a category is required for every triage treatment except Transfer",
+        ));
+    }
 
     let input = TriageInput {
         transaction_id,

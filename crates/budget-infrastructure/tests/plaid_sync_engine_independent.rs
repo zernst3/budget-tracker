@@ -478,6 +478,7 @@ fn plaid_txn(id: &str, amount: Decimal, d: NaiveDate, pending: bool) -> PlaidTra
         name: format!("merchant-{id}"),
         pending,
         pending_transaction_id: None,
+        plaid_category: None,
     }
 }
 

@@ -2,8 +2,9 @@
 //!
 //! Covers regular expenses/income (Plaid or manual), the system-generated
 //! rollover line item (`is_rollover = true`, `BUDGET-ROLLOVER-INTEGRITY-1`),
-//! expected-expense placeholders (`status = Expected`, `SPEC §4.10`), and income
-//! flows (`income_kind` set, `SPEC §4.8`).
+//! expected-expense placeholders (`status = Expected`, `SPEC §4.10`), income
+//! flows (`income_kind` set, `SPEC §4.8`), and internal transfers
+//! (`is_transfer = true`, `BUDGET-TRANSFER-EXCLUDE-1`, `SPEC §4.11`).
 //!
 //! [`Transaction::amount`] is signed: **negative = expense, positive = inflow**
 //! (the internal convention). Plaid amounts are flipped once at the mapper
@@ -12,7 +13,11 @@
 //!
 //! Whether a transaction counts toward budget math is decided by
 //! [`crate::predicates::counts_in_budget`] keyed on [`Transaction::status`]
-//! (`BUDGET-STATUS-DRIVES-INCLUSION-1`) — never by an inline status match here.
+//! (`BUDGET-STATUS-DRIVES-INCLUSION-1`) and [`Transaction::is_transfer`]
+//! (`BUDGET-TRANSFER-EXCLUDE-1`) — never by inline status/flag checks scattered
+//! through the codebase. The predicate
+//! [`crate::predicates::counts_in_month_expense_remaining`] is the single place
+//! both exclusion rules are composed.
 
 use chrono::{DateTime, NaiveDate, Utc};
 
@@ -84,6 +89,34 @@ pub struct Transaction {
     /// Inline-editable on a transaction row in the month ledger; also settable
     /// during Pending triage. No validation — any UTF-8 string is accepted.
     pub comment: Option<String>,
+    /// `true` when this row is an **internal account movement** — a credit-card
+    /// payment or a checking↔savings transfer (`SPEC §4.11`, D10, migration m0006,
+    /// `BUDGET-TRANSFER-EXCLUDE-1`).
+    ///
+    /// A transfer is **tracked** (visible in the ledger with distinct styling) but
+    /// **excluded** from budget math on BOTH legs: the funding-account outflow and
+    /// the destination-account inflow. The exclusion is enforced by the single
+    /// [`crate::predicates::counts_in_month_expense_remaining`] predicate (which
+    /// adds `&& !txn.is_transfer`) and every SQL aggregate that mirrors it; no
+    /// other code should re-implement this exclusion.
+    ///
+    /// `is_transfer` is set **only at triage** (the 4th "Transfer / card payment"
+    /// treatment). It is **never auto-applied** by the ingest path — Plaid's
+    /// `plaid_category` (below) drives an AUTO-SUGGEST only; the user confirms.
+    /// Defaults `false` for all rows.
+    pub is_transfer: bool,
+    /// Plaid `personal_finance_category.detailed` string, captured at ingest
+    /// (`SPEC §4.11`, D10, migration m0006).
+    ///
+    /// Examples: `LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`, `TRANSFER_OUT`,
+    /// `TRANSFER_IN`. Present only on Plaid-sourced rows where Plaid provided a
+    /// category. `None` for manual rows, rollover rows, or Plaid rows where the
+    /// field was absent.
+    ///
+    /// **Audit/suggestion only** — drives the triage Transfer AUTO-SUGGEST but is
+    /// never used in budget math. The actual exclusion is driven by
+    /// [`Transaction::is_transfer`].
+    pub plaid_category: Option<String>,
     /// When the row was created (UTC, `DOMAIN-7`).
     pub created_at: DateTime<Utc>,
     /// When the row was last updated (UTC, `DOMAIN-7`).

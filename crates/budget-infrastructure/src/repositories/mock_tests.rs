@@ -150,6 +150,8 @@ fn sample_txn_model(
         is_fund_draw: false,
         matched_transaction_id: None,
         comment: None,
+        is_transfer: false,
+        plaid_category: None,
         created_at: now_fixed().into(),
         updated_at: now_fixed().into(),
     }

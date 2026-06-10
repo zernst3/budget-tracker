@@ -86,6 +86,9 @@ enum TreatmentChoice {
     PayFromSavings,
     /// (b) Spread over the next few months — buffer-financed (D7).
     SpreadOverMonths,
+    /// (d) Transfer / card payment — NOT an expense (`SPEC §4.11` D10). Sets
+    /// `is_transfer = true`; requires no category and no fund.
+    Transfer,
 }
 
 impl TreatmentChoice {
@@ -94,6 +97,7 @@ impl TreatmentChoice {
         match v {
             "savings" => Self::PayFromSavings,
             "spread" => Self::SpreadOverMonths,
+            "transfer" => Self::Transfer,
             _ => Self::PayDirectly,
         }
     }
@@ -104,6 +108,7 @@ impl TreatmentChoice {
             Self::PayDirectly => "direct",
             Self::PayFromSavings => "savings",
             Self::SpreadOverMonths => "spread",
+            Self::Transfer => "transfer",
         }
     }
 }
@@ -312,8 +317,23 @@ fn PendingRowCard(
 ) -> Element {
     let txn_id = row.id.clone();
 
-    // Pull this row's current draft (default if not yet touched).
-    let draft = drafts.read().get(&txn_id).cloned().unwrap_or_default();
+    // Pull this row's current draft (default if not yet touched). SPEC §4.11 D10:
+    // when Plaid's category suggests a transfer AND the user has not yet touched this
+    // row, PRE-SELECT the Transfer treatment for them to confirm. This is a UI
+    // suggestion only — the server never auto-sets is_transfer; the user confirms (or
+    // switches the treatment) and the actual mutation happens on Triage.
+    let draft = drafts
+        .read()
+        .get(&txn_id)
+        .cloned()
+        .unwrap_or_else(|| RowDraft {
+            treatment: if row.suggested_transfer {
+                TreatmentChoice::Transfer
+            } else {
+                TreatmentChoice::PayDirectly
+            },
+            ..Default::default()
+        });
     let treatment = draft.treatment;
 
     // -- Input handlers (each mutates this row's draft entry in place) --
@@ -413,16 +433,20 @@ fn PendingRowCard(
             // -- Editable controls --
             div { class: "inbox-card__fields",
 
-                // Category (required).
-                label { class: "field-label",
-                    "Category"
-                    select {
-                        style: "min-width: 150px;",
-                        value: "{draft.category_id}",
-                        onchange: on_category,
-                        option { value: "", "— choose —" }
-                        for cat in categories.iter() {
-                            option { value: "{cat.id}", "{cat.name}" }
+                // Category — required for the expense treatments, hidden for Transfer
+                // (SPEC §4.11 D10: a transfer carries no category; hiding the
+                // dead-end affordance per PROC-HIDE-DEAD-END-1).
+                if treatment != TreatmentChoice::Transfer {
+                    label { class: "field-label",
+                        "Category"
+                        select {
+                            style: "min-width: 150px;",
+                            value: "{draft.category_id}",
+                            onchange: on_category,
+                            option { value: "", "— choose —" }
+                            for cat in categories.iter() {
+                                option { value: "{cat.id}", "{cat.name}" }
+                            }
                         }
                     }
                 }
@@ -449,6 +473,7 @@ fn PendingRowCard(
                         option { value: "direct", "Pay directly (default)" }
                         option { value: "savings", "Pay from savings" }
                         option { value: "spread", "Spread over months" }
+                        option { value: "transfer", "Transfer / card payment (not an expense)" }
                     }
                 }
 
@@ -525,17 +550,18 @@ fn PendingRowCard(
 /// surfaces the message it already set, OR a generic fallback. We keep validation
 /// pure (no `Signal` access) so it is trivially testable.
 ///
-/// Rules (`SPEC §4.9` / the BACKEND-3 contract):
-///   - category is required (it is what removes the row from the inbox);
+/// Rules (`SPEC §4.9` / `§4.11` / the BACKEND-3 contract):
+///   - category is required for the three EXPENSE treatments (it is what removes the
+///     row from the inbox), and NOT required for `Transfer` (which removes the row
+///     via `is_transfer = true`, `SPEC §4.11` D10);
 ///   - `PayFromSavings` needs a fund;
 ///   - `SpreadOverMonths` needs a (buffer) fund AND `months >= 1`;
-///   - `PayDirectly` needs nothing extra.
+///   - `PayDirectly` needs nothing extra;
+///   - `Transfer` needs nothing extra (no category, no fund).
 ///
-/// The empty-string comment normalizes to `None` (no note), non-empty to `Some`.
-fn validate_draft(draft: &RowDraft) -> Option<(String, TreatmentDto, Option<String>)> {
-    if draft.category_id.is_empty() {
-        return None;
-    }
+/// The empty-string comment normalizes to `None` (no note), non-empty to `Some`. The
+/// returned category is `Some(id)` for an expense treatment and `None` for `Transfer`.
+fn validate_draft(draft: &RowDraft) -> Option<(Option<String>, TreatmentDto, Option<String>)> {
     let comment = if draft.comment.trim().is_empty() {
         None
     } else {
@@ -564,8 +590,19 @@ fn validate_draft(draft: &RowDraft) -> Option<(String, TreatmentDto, Option<Stri
                 months,
             }
         }
+        // SPEC §4.11 D10: Transfer requires neither a category nor a fund.
+        TreatmentChoice::Transfer => TreatmentDto::Transfer,
     };
-    Some((draft.category_id.clone(), treatment, comment))
+    // Category is required for the expense treatments only.
+    let category_id = if matches!(treatment, TreatmentDto::Transfer) {
+        None
+    } else {
+        if draft.category_id.is_empty() {
+            return None;
+        }
+        Some(draft.category_id.clone())
+    };
+    Some((category_id, treatment, comment))
 }
 
 // ---------------------------------------------------------------------------
@@ -606,9 +643,23 @@ mod tests {
             ..Default::default()
         };
         let (cat, treatment, comment) = validate_draft(&d).expect("valid");
-        assert_eq!(cat, "cat-1");
+        assert_eq!(cat.as_deref(), Some("cat-1"));
         assert_eq!(treatment, TreatmentDto::PayDirectly);
         assert_eq!(comment, None);
+    }
+
+    #[test]
+    fn transfer_needs_no_category_or_fund() {
+        // SPEC §4.11 D10: the Transfer treatment validates with NO category and NO
+        // fund — it removes the row via is_transfer=true, not a category. The
+        // returned category is None.
+        let d = RowDraft {
+            treatment: TreatmentChoice::Transfer,
+            ..Default::default()
+        };
+        let (cat, treatment, _) = validate_draft(&d).expect("transfer with no category is valid");
+        assert_eq!(cat, None, "Transfer carries no category");
+        assert_eq!(treatment, TreatmentDto::Transfer);
     }
 
     #[test]

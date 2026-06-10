@@ -74,6 +74,62 @@ struct MonthNetRow {
     net: rust_decimal::Decimal,
 }
 
+// The per-category spent aggregate SQL (REPO-9, RUST-SEAORM-RAW-SQL-ESCAPE-1).
+//
+// status IN ('settled','expected') == counts_in_budget()==true
+// (BUDGET-STATUS-DRIVES-INCLUSION-1). category_id IS NOT NULL excludes uncategorized
+// rows (they belong to no bucket). matched_transaction_id IS NULL excludes a matched
+// expected placeholder (BUDGET-SETTLE-ON-MATCH-1): the real txn it links to counts
+// instead, so the pair counts exactly once (BUDGET-NO-DOUBLE-CHARGE-1); only
+// 'expected' rows carry the link, so this never excludes a settled row.
+// is_fund_draw = false excludes a fund DRAW (surplus draw, sinking payout, a
+// PayFromSavings triage) — the money was already expensed at contribution time, so
+// the categorized draw row must NOT re-charge its category (BUDGET-NO-DOUBLE-CHARGE-1
+// / BUDGET-FUND-EARMARK-1); this matches the close-path predicate
+// counts_in_month_expense_remaining. The buffer-financed full-price tracking row is
+// uncategorized (category_id IS NULL) and is therefore already excluded by
+// construction.
+//
+// is_transfer = false mirrors the `&& !txn.is_transfer` term of
+// counts_in_month_expense_remaining (BUDGET-TRANSFER-EXCLUDE-1 / SPEC §4.11 D10): an
+// internal account movement (credit-card payment, checking↔savings transfer) is
+// EXCLUDED from category spent on BOTH legs (the funding-account outflow AND the
+// destination-account inflow), so a transfer can never leak into a category's spent.
+// A transfer row may carry a category_id (the user can leave a categorized row that
+// they later mark Transfer), so this filter is required here, not implied by
+// category_id. Source table: transactions (m0001, columns from m0006).
+const CATEGORY_SPENT_SQL: &str = "SELECT category_id, SUM(amount) AS spent \
+     FROM transactions \
+     WHERE month_id = $1 \
+       AND category_id IS NOT NULL \
+       AND status IN ('settled', 'expected') \
+       AND matched_transaction_id IS NULL \
+       AND is_fund_draw = false \
+       AND is_transfer = false \
+     GROUP BY category_id";
+
+// The month-net scalar aggregate SQL (REPO-9, RUST-SEAORM-RAW-SQL-ESCAPE-1).
+//
+// COALESCE so an empty month nets to 0 rather than NULL (the trait contract returns a
+// zero net, never None). Same inclusion polarity as CATEGORY_SPENT_SQL
+// (BUDGET-STATUS-DRIVES-INCLUSION-1). matched_transaction_id IS NULL excludes a
+// matched expected placeholder (BUDGET-SETTLE-ON-MATCH-1) so the placeholder/real
+// pair counts once.
+//
+// is_transfer = false mirrors the `&& !txn.is_transfer` term of
+// counts_in_month_expense_remaining (BUDGET-TRANSFER-EXCLUDE-1 / SPEC §4.11 D10): an
+// internal transfer is excluded from the month net on BOTH legs — the funding-account
+// outflow (a negative amount that would understate net as spending) AND the
+// destination-account inflow (a positive amount that would wrongly inflate net as if
+// it were income). Excluding both keeps the rolling Other free of any transfer leak.
+// Source: transactions (m0001, is_transfer from m0006).
+const MONTH_NET_SQL: &str = "SELECT COALESCE(SUM(amount), 0) AS net \
+     FROM transactions \
+     WHERE month_id = $1 \
+       AND status IN ('settled', 'expected') \
+       AND matched_transaction_id IS NULL \
+       AND is_transfer = false";
+
 #[async_trait]
 impl TransactionRepository for PostgresTransactionRepository {
     async fn find_by_id(&self, id: TransactionId) -> Result<Option<Transaction>, RepositoryError> {
@@ -101,14 +157,20 @@ impl TransactionRepository for PostgresTransactionRepository {
         &self,
         user_id: UserId,
     ) -> Result<Vec<Transaction>, RepositoryError> {
-        // The triage inbox (SPEC §7): settled + uncategorized. The `Settled`
-        // status filter is what keeps Plaid `pending` charges (status='pending')
-        // out of the inbox (SPEC §4.4) — they are excluded by construction, not by
-        // a separate guard. Scoped to user_id (SPEC §9.1).
+        // The triage inbox (SPEC §7 / §4.11): settled + uncategorized + NOT a
+        // transfer. The `Settled` status filter is what keeps Plaid `pending`
+        // charges (status='pending') out of the inbox (SPEC §4.4) — they are
+        // excluded by construction, not by a separate guard. The `is_transfer =
+        // false` filter (BUDGET-TRANSFER-EXCLUDE-1 / SPEC §4.11 D10) is what lets a
+        // triaged transfer LEAVE the inbox without a category: the Transfer treatment
+        // sets is_transfer=true (not a category), so the inbox predicate is
+        // `status='settled' AND category_id IS NULL AND is_transfer = false`. Scoped
+        // to user_id (SPEC §9.1).
         let models = transactions::Entity::find()
             .filter(transactions::Column::UserId.eq(user_id.value()))
             .filter(transactions::Column::Status.eq(transactions::TransactionStatus::Settled))
             .filter(transactions::Column::CategoryId.is_null())
+            .filter(transactions::Column::IsTransfer.eq(false))
             .order_by_asc(transactions::Column::Date)
             .all(&self.db)
             .await
@@ -202,35 +264,14 @@ impl TransactionRepository for PostgresTransactionRepository {
         &self,
         month_id: MonthId,
     ) -> Result<Vec<CategorySpent>, RepositoryError> {
-        // Conditional grouped aggregate over transactions; the typed builder
-        // cannot express GROUP BY + SUM into a projection cleanly, so use the
-        // raw-SQL escape (RUST-SEAORM-RAW-SQL-ESCAPE-1) parsed into
-        // CategorySpentRow. Source table: transactions (migration m0001).
-        // status IN ('settled','expected') == counts_in_budget()==true
-        // (BUDGET-STATUS-DRIVES-INCLUSION-1). category_id IS NOT NULL excludes
-        // uncategorized rows (they belong to no bucket).
-        // matched_transaction_id IS NULL excludes a matched expected placeholder
-        // (BUDGET-SETTLE-ON-MATCH-1): the real txn it links to counts instead, so
-        // the pair counts exactly once (BUDGET-NO-DOUBLE-CHARGE-1). Only 'expected'
-        // rows ever carry the link, so this never excludes a settled row.
-        // is_fund_draw = false excludes a fund DRAW (surplus draw, sinking payout,
-        // a PayFromSavings triage) from category spent (BUDGET-NO-DOUBLE-CHARGE-1 /
-        // BUDGET-FUND-EARMARK-1): the money was already expensed at contribution
-        // time, so the categorized draw row must NOT re-charge its category. This
-        // matches the close-path predicate counts_in_month_expense_remaining. The
-        // buffer-financed full-price tracking row is uncategorized (category_id IS
-        // NULL) and is therefore already excluded here by construction.
-        let sql = "SELECT category_id, SUM(amount) AS spent \
-                   FROM transactions \
-                   WHERE month_id = $1 \
-                     AND category_id IS NOT NULL \
-                     AND status IN ('settled', 'expected') \
-                     AND matched_transaction_id IS NULL \
-                     AND is_fund_draw = false \
-                   GROUP BY category_id";
+        // Conditional grouped aggregate over transactions; the typed builder cannot
+        // express GROUP BY + SUM into a projection cleanly, so use the raw-SQL escape
+        // (RUST-SEAORM-RAW-SQL-ESCAPE-1) parsed into CategorySpentRow. The WHERE
+        // clause (including the BUDGET-TRANSFER-EXCLUDE-1 `is_transfer = false` mirror)
+        // and its rule cross-references are documented on CATEGORY_SPENT_SQL.
         let stmt = Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
-            sql,
+            CATEGORY_SPENT_SQL,
             [month_id.value().into()],
         );
         let rows = CategorySpentRow::find_by_statement(stmt)
@@ -247,20 +288,12 @@ impl TransactionRepository for PostgresTransactionRepository {
     }
 
     async fn month_net(&self, month_id: MonthId) -> Result<MonthNet, RepositoryError> {
-        // Single scalar aggregate; COALESCE so an empty month nets to 0 rather
-        // than NULL (the trait contract returns a zero net, never None). Same
-        // inclusion polarity as category_spent_for_month
-        // (BUDGET-STATUS-DRIVES-INCLUSION-1). Source: transactions (m0001).
-        // matched_transaction_id IS NULL excludes a matched expected placeholder
-        // (BUDGET-SETTLE-ON-MATCH-1) so the placeholder/real pair counts once.
-        let sql = "SELECT COALESCE(SUM(amount), 0) AS net \
-                   FROM transactions \
-                   WHERE month_id = $1 \
-                     AND status IN ('settled', 'expected') \
-                     AND matched_transaction_id IS NULL";
+        // Single scalar aggregate; the WHERE clause (including the
+        // BUDGET-TRANSFER-EXCLUDE-1 `is_transfer = false` mirror) and its rule
+        // cross-references are documented on MONTH_NET_SQL.
         let stmt = Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
-            sql,
+            MONTH_NET_SQL,
             [month_id.value().into()],
         );
         let row = MonthNetRow::find_by_statement(stmt)
@@ -298,5 +331,44 @@ impl TransactionRepository for PostgresTransactionRepository {
             })
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod sql_tests {
+    //! Structural assertions over the budget-math aggregate SQL
+    //! (`ORCH-NEW-PATH-TESTS-1`). `MockDatabase` does not execute the WHERE clause,
+    //! so the only honest unit-level guard that the `is_transfer = false` exclusion
+    //! is actually in each aggregate is to assert the SQL text carries it. The live
+    //! exclusion behaviour is covered by the domain predicate suite and the
+    //! `DATABASE_URL`-gated live integration tests.
+
+    use super::{CATEGORY_SPENT_SQL, MONTH_NET_SQL};
+
+    #[test]
+    fn category_spent_sql_excludes_transfers() {
+        // BUDGET-TRANSFER-EXCLUDE-1 / SPEC §4.11 D10: category spent must mirror the
+        // predicate's `&& !txn.is_transfer` with `AND is_transfer = false`.
+        assert!(
+            CATEGORY_SPENT_SQL.contains("is_transfer = false"),
+            "category-spent aggregate must exclude transfers (is_transfer = false)"
+        );
+        // Sibling exclusions still present (regression guard against an edit dropping
+        // one while adding the transfer filter).
+        assert!(CATEGORY_SPENT_SQL.contains("is_fund_draw = false"));
+        assert!(CATEGORY_SPENT_SQL.contains("matched_transaction_id IS NULL"));
+        assert!(CATEGORY_SPENT_SQL.contains("status IN ('settled', 'expected')"));
+    }
+
+    #[test]
+    fn month_net_sql_excludes_transfers() {
+        // BUDGET-TRANSFER-EXCLUDE-1: the month net must mirror the predicate too, so a
+        // transfer leg (negative outflow OR positive inflow) never moves the net.
+        assert!(
+            MONTH_NET_SQL.contains("is_transfer = false"),
+            "month-net aggregate must exclude transfers (is_transfer = false)"
+        );
+        assert!(MONTH_NET_SQL.contains("matched_transaction_id IS NULL"));
+        assert!(MONTH_NET_SQL.contains("status IN ('settled', 'expected')"));
     }
 }

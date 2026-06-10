@@ -16,6 +16,10 @@
 //!   - `source / status / income_kind`: entity enum → domain enum (1:1)
 //!   - `date`: `Date` (`NaiveDate`) — same type; pass through
 //!   - `created_at / updated_at`: `DateTimeWithTimeZone` → `DateTime<Utc>` (`DOMAIN-7`)
+//!   - `is_transfer`: `bool` — pass through; default `false` for new Plaid rows
+//!     (`BUDGET-TRANSFER-EXCLUDE-1`, `SPEC §4.11`, migration m0006)
+//!   - `plaid_category`: `Option<String>` — pass through; populated from
+//!     `PlaidTransaction.plaid_category` at ingest (`SPEC §4.11`, migration m0006)
 
 use chrono::{DateTime, Utc};
 use sea_orm::ActiveValue::Set;
@@ -100,6 +104,13 @@ fn build_transaction(m: transactions::Model, amount: Money) -> Transaction {
         is_fund_draw: m.is_fund_draw,
         matched_transaction_id: m.matched_transaction_id.map(TransactionId::new),
         comment: m.comment,
+        // BUDGET-TRANSFER-EXCLUDE-1 / SPEC §4.11 / migration m0006: thread
+        // is_transfer through from the stored entity value. Rows stored before
+        // m0006 carry DB default false — the correct initial state.
+        is_transfer: m.is_transfer,
+        // SPEC §4.11 / migration m0006: Plaid category string for triage
+        // AUTO-SUGGEST. NULL for non-Plaid rows and pre-m0006 rows.
+        plaid_category: m.plaid_category,
         created_at: m.created_at.with_timezone(&Utc),
         updated_at: m.updated_at.with_timezone(&Utc),
     }
@@ -237,6 +248,14 @@ pub fn plaid_dto_to_domain(
         // Plaid rows land without a user note; the user adds one later via
         // the ledger or triage UI (SPEC §7).
         comment: None,
+        // BUDGET-TRANSFER-EXCLUDE-1 / SPEC §4.11 D10: is_transfer defaults false
+        // at ingest — the transfer AUTO-SUGGEST (via plaid_category below)
+        // pre-selects the triage treatment, but the user must confirm; the flag
+        // is never auto-applied by the ingest path.
+        is_transfer: false,
+        // SPEC §4.11 / migration m0006: capture Plaid's category string for
+        // triage AUTO-SUGGEST. None when Plaid did not supply the field.
+        plaid_category: dto.plaid_category.clone(),
         created_at: now,
         updated_at: now,
     })
@@ -265,6 +284,10 @@ pub fn domain_to_active_model(v: &Transaction) -> transactions::ActiveModel {
         is_fund_draw: Set(v.is_fund_draw),
         matched_transaction_id: Set(v.matched_transaction_id.map(|id| id.value())),
         comment: Set(v.comment.clone()),
+        // BUDGET-TRANSFER-EXCLUDE-1 / SPEC §4.11 / migration m0006.
+        is_transfer: Set(v.is_transfer),
+        // SPEC §4.11 / migration m0006: Plaid category for triage AUTO-SUGGEST.
+        plaid_category: Set(v.plaid_category.clone()),
         created_at: Set(v.created_at.into()),
         updated_at: Set(v.updated_at.into()),
     }
@@ -296,6 +319,9 @@ mod tests {
             is_fund_draw: false,
             matched_transaction_id: None,
             comment: None,
+            // BUDGET-TRANSFER-EXCLUDE-1 / migration m0006: default false.
+            is_transfer: false,
+            plaid_category: None,
             created_at: now.into(),
             updated_at: now.into(),
         }
@@ -453,6 +479,7 @@ mod tests {
             name: "Whole Foods".to_owned(),
             pending: false,
             pending_transaction_id: None,
+            plaid_category: None,
         };
         let domain = plaid_dto_to_domain(
             &dto,
@@ -467,6 +494,152 @@ mod tests {
         assert_eq!(
             domain.comment, None,
             "freshly-ingested Plaid row has no comment"
+        );
+    }
+
+    // -- BUDGET-TRANSFER-EXCLUDE-1 / SPEC §4.11 / migration m0006 ------------
+
+    #[test]
+    fn is_transfer_flag_round_trips_both_directions() {
+        // BUDGET-TRANSFER-EXCLUDE-1: is_transfer must survive read AND write so
+        // the triage Transfer treatment is durable across DB round-trips.
+
+        // is_transfer=true — a triaged card payment.
+        let mut m = sample_model(Decimal::new(-50_000, 2)); // -$500 card payment
+        m.is_transfer = true;
+        m.source = transactions::TransactionSource::Manual;
+        let domain = model_to_domain(m).unwrap_or_else(|_| unreachable!());
+        assert!(domain.is_transfer, "is_transfer=true preserved on read");
+
+        let active = domain_to_active_model(&domain);
+        assert_eq!(
+            active.is_transfer,
+            sea_orm::ActiveValue::Set(true),
+            "is_transfer=true preserved on write"
+        );
+
+        // is_transfer=false (default) — a normal expense is not a transfer.
+        let m2 = sample_model(Decimal::new(-1250, 2));
+        let domain2 = model_to_domain(m2).unwrap_or_else(|_| unreachable!());
+        assert!(
+            !domain2.is_transfer,
+            "is_transfer=false (default) preserved on read"
+        );
+        let active2 = domain_to_active_model(&domain2);
+        assert_eq!(
+            active2.is_transfer,
+            sea_orm::ActiveValue::Set(false),
+            "is_transfer=false (default) preserved on write"
+        );
+    }
+
+    #[test]
+    fn plaid_category_round_trips_some_and_none() {
+        // SPEC §4.11 / migration m0006: plaid_category must survive read AND write
+        // for both Some (a Plaid category was captured) and None.
+
+        // Some — a card payment tagged by Plaid.
+        let mut m = sample_model(Decimal::new(-50_000, 2));
+        m.plaid_category = Some("LOAN_PAYMENTS_CREDIT_CARD_PAYMENT".to_owned());
+        let domain = model_to_domain(m).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            domain.plaid_category,
+            Some("LOAN_PAYMENTS_CREDIT_CARD_PAYMENT".to_owned()),
+            "plaid_category Some preserved on read"
+        );
+        let active = domain_to_active_model(&domain);
+        assert_eq!(
+            active.plaid_category,
+            sea_orm::ActiveValue::Set(Some("LOAN_PAYMENTS_CREDIT_CARD_PAYMENT".to_owned())),
+            "plaid_category Some preserved on write"
+        );
+
+        // None — most rows.
+        let m2 = sample_model(Decimal::new(-1250, 2));
+        let domain2 = model_to_domain(m2).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            domain2.plaid_category, None,
+            "plaid_category None preserved on read"
+        );
+        let active2 = domain_to_active_model(&domain2);
+        assert_eq!(
+            active2.plaid_category,
+            sea_orm::ActiveValue::Set(None),
+            "plaid_category None preserved on write"
+        );
+    }
+
+    #[test]
+    fn plaid_dto_to_domain_captures_plaid_category() {
+        // SPEC §4.11 / migration m0006: plaid_category from the DTO is threaded
+        // into the domain Transaction at ingest for the triage AUTO-SUGGEST.
+        use budget_domain::plaid_api::PlaidTransaction;
+
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 10, 0, 0).unwrap();
+        let dto = PlaidTransaction {
+            transaction_id: "plaid-transfer-out-001".to_owned(),
+            account_id: "checking-account".to_owned(),
+            amount: Decimal::new(50_000, 2), // Plaid positive = outflow
+            date: NaiveDate::from_ymd_opt(2026, 6, 9).unwrap_or(NaiveDate::MIN),
+            name: "Payment to Credit Card".to_owned(),
+            pending: false,
+            pending_transaction_id: None,
+            plaid_category: Some("TRANSFER_OUT".to_owned()),
+        };
+        let domain = plaid_dto_to_domain(
+            &dto,
+            TransactionId::new(Uuid::new_v4()),
+            UserId::new(Uuid::new_v4()),
+            MonthId::new(Uuid::new_v4()),
+            None,
+            budget_domain::enums::TransactionStatus::Settled,
+            now,
+        )
+        .unwrap_or_else(|_| unreachable!());
+
+        // plaid_category is threaded through for the triage AUTO-SUGGEST.
+        assert_eq!(
+            domain.plaid_category,
+            Some("TRANSFER_OUT".to_owned()),
+            "plaid_category from the DTO must be captured at ingest"
+        );
+        // is_transfer is NOT auto-applied — the user must confirm at triage.
+        assert!(
+            !domain.is_transfer,
+            "is_transfer must remain false at ingest (BUDGET-TRANSFER-EXCLUDE-1: never auto-applied)"
+        );
+    }
+
+    #[test]
+    fn plaid_dto_to_domain_without_plaid_category_gives_none() {
+        // When Plaid does not supply personal_finance_category, plaid_category
+        // lands as None — no crash, no fallback value.
+        use budget_domain::plaid_api::PlaidTransaction;
+
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 10, 0, 0).unwrap();
+        let dto = PlaidTransaction {
+            transaction_id: "plaid-no-cat-001".to_owned(),
+            account_id: "checking-account".to_owned(),
+            amount: Decimal::new(2500, 2),
+            date: NaiveDate::from_ymd_opt(2026, 6, 9).unwrap_or(NaiveDate::MIN),
+            name: "COFFEE SHOP".to_owned(),
+            pending: false,
+            pending_transaction_id: None,
+            plaid_category: None,
+        };
+        let domain = plaid_dto_to_domain(
+            &dto,
+            TransactionId::new(Uuid::new_v4()),
+            UserId::new(Uuid::new_v4()),
+            MonthId::new(Uuid::new_v4()),
+            None,
+            budget_domain::enums::TransactionStatus::Settled,
+            now,
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            domain.plaid_category, None,
+            "no plaid_category field -> None on domain"
         );
     }
 
