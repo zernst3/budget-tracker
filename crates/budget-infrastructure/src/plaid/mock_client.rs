@@ -167,6 +167,7 @@ mod tests {
     /// The fixtures must deserialize through the real wire DTOs (byte-level
     /// contract), and the cursor walk must yield the expected pages.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // comprehensive fixture walk; splitting would lose narrative
     async fn cursor_walk_yields_expected_pages_through_real_wire_dtos() {
         let api = MockPlaidApi::new();
 
@@ -230,15 +231,63 @@ mod tests {
         );
         assert_eq!(p2.next_cursor, CURSOR_AFTER_PAGE_2);
 
-        // --- Page 3: a `removed` example, plus a steady add. ------------------
+        // --- Page 3: a `removed` example, the coffee add, and the D10 credit-
+        //     card-payment scenario (SPEC §4.11 / BUDGET-TRANSFER-EXCLUDE-1).
         let p3 = api
             .transactions_sync(MOCK_ACCESS_TOKEN, Some(&p2.next_cursor))
             .await
             .unwrap();
         assert_eq!(p3.removed.len(), 1, "page 3 removes one transaction");
         assert_eq!(p3.removed[0], "mock-txn-0002-gas");
-        assert_eq!(p3.added.len(), 1, "page 3 adds the coffee");
+        assert_eq!(
+            p3.added.len(),
+            3,
+            "page 3 adds coffee + both legs of the credit-card payment (D10)"
+        );
         assert_eq!(p3.next_cursor, "mock-cursor-after-page-3");
+
+        // D10 credit-card-payment legs: both carry plaid_category that drives
+        // suggested_transfer=true in the triage inbox (BUDGET-TRANSFER-EXCLUDE-1).
+        // - checking outflow: positive amount (Plaid outflow convention), non-pending,
+        //   plaid_category = "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT".
+        // - card-side payment credit: negative amount (Plaid inflow convention),
+        //   non-pending, same plaid_category.
+        let cc_payment_checking = p3
+            .added
+            .iter()
+            .find(|t| t.transaction_id == "mock-txn-0007-cc-payment-checking")
+            .unwrap();
+        assert_eq!(
+            cc_payment_checking.amount,
+            Decimal::new(50_000, 2),
+            "checking card-payment outflow: positive Plaid amount (outflow convention)"
+        );
+        assert!(!cc_payment_checking.pending, "checking leg is settled");
+        assert_eq!(
+            cc_payment_checking.plaid_category.as_deref(),
+            Some("LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"),
+            "checking leg plaid_category must match the D10 trigger value"
+        );
+
+        let cc_payment_credit = p3
+            .added
+            .iter()
+            .find(|t| t.transaction_id == "mock-txn-0008-cc-payment-credit")
+            .unwrap();
+        assert_eq!(
+            cc_payment_credit.amount,
+            Decimal::new(-50_000, 2),
+            "card-side payment credit: negative Plaid amount (inflow convention)"
+        );
+        assert!(
+            !cc_payment_credit.pending,
+            "card-payment credit leg is settled"
+        );
+        assert_eq!(
+            cc_payment_credit.plaid_category.as_deref(),
+            Some("LOAN_PAYMENTS_CREDIT_CARD_PAYMENT"),
+            "card-side credit plaid_category must match the D10 trigger value"
+        );
 
         // --- Terminal: any cursor past the end -> empty steady-state. ---------
         let p4 = api

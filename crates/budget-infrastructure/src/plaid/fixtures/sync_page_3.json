@@ -13,6 +13,44 @@
       "pending": false,
       "pending_transaction_id": null,
       "payment_channel": "in store"
+    },
+    {
+      "transaction_id": "mock-txn-0007-cc-payment-checking",
+      "account_id": "mock-account-checking",
+      "amount": 500.00,
+      "iso_currency_code": "USD",
+      "unofficial_currency_code": null,
+      "date": "2026-06-08",
+      "authorized_date": "2026-06-08",
+      "name": "BANK OF AMERICA CREDIT CARD PAYMENT",
+      "merchant_name": null,
+      "pending": false,
+      "pending_transaction_id": null,
+      "payment_channel": "online",
+      "personal_finance_category": {
+        "primary": "LOAN_PAYMENTS",
+        "detailed": "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT",
+        "confidence_level": "VERY_HIGH"
+      }
+    },
+    {
+      "transaction_id": "mock-txn-0008-cc-payment-credit",
+      "account_id": "mock-account-credit",
+      "amount": -500.00,
+      "iso_currency_code": "USD",
+      "unofficial_currency_code": null,
+      "date": "2026-06-08",
+      "authorized_date": "2026-06-08",
+      "name": "PAYMENT THANK YOU",
+      "merchant_name": null,
+      "pending": false,
+      "pending_transaction_id": null,
+      "payment_channel": "online",
+      "personal_finance_category": {
+        "primary": "LOAN_PAYMENTS",
+        "detailed": "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT",
+        "confidence_level": "VERY_HIGH"
+      }
     }
   ],
   "modified": [],
@@ -22,6 +60,14 @@
     }
   ],
   "accounts": [
+    {
+      "account_id": "mock-account-checking",
+      "name": "Mock Checking",
+      "official_name": "Mock Bank Checking Account",
+      "type": "depository",
+      "subtype": "checking",
+      "mask": "0001"
+    },
     {
       "account_id": "mock-account-credit",
       "name": "Mock Rewards Card",

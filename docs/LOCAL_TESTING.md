@@ -224,29 +224,72 @@ Open `http://localhost:8080` in your browser.
 13. Triage The Smith and Spotify (categorize both).
 14. Verify the inbox clears.
 
-### Pull (third time — page 3)
+### Pull (third time — page 3, includes the D10 credit-card-payment scenario)
 
 15. Click **Pull** a third time. The mock serves page 3:
     - **removed**: `mock-txn-0002-gas` (the Chevron). If it was categorized,
       it should disappear from the Ledger; if it had a settlement match, the
       placeholder should be restored.
-    - **added**: Blue Bottle Coffee $5.50 (a new discretionary transaction).
+    - **added**: Blue Bottle Coffee $5.75 (a new discretionary transaction).
+    - **added**: `mock-txn-0007-cc-payment-checking` — "BANK OF AMERICA CREDIT
+      CARD PAYMENT" $500.00 on the checking account. Plaid
+      `personal_finance_category.detailed = LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`.
+      This is the **checking-outflow leg** of the D10 double-count scenario.
+    - **added**: `mock-txn-0008-cc-payment-credit` — "PAYMENT THANK YOU"
+      $-500.00 on the credit card account. Same `plaid_category`. This is the
+      **card-side payment-credit leg** (an inflow that would wrongly offset
+      expenses if not excluded).
 16. Verify the gas row is gone from the Ledger.
-17. Triage the coffee row.
+17. Triage the coffee row (assign to a category, e.g. Dining).
+
+### D10 internal-transfer triage (credit-card-payment double-count fix)
+
+18. The triage inbox now shows the two credit-card-payment rows. Both should
+    have the Transfer treatment **pre-selected** (the `suggested_transfer` flag
+    is `true` because their `plaid_category = LOAN_PAYMENTS_CREDIT_CARD_PAYMENT`
+    matches the `plaid_category_suggests_transfer` predicate).
+
+    Verify the following for **each leg** (`mock-txn-0007` and `mock-txn-0008`):
+    - The Transfer treatment is pre-selected in the triage UI (the suggestion).
+      The user can override to a category treatment if they choose, but the
+      pre-selection should be Transfer.
+    - Confirm the Transfer treatment for each row. This sets `is_transfer=true`
+      and removes the row from the inbox **without requiring a category**
+      (`BUDGET-TRANSFER-EXCLUDE-1`).
+
+19. After confirming both legs as Transfer, verify:
+    - Both rows are **gone from the triage inbox** (removed via `is_transfer=true`,
+      not via a category; `SPEC §4.11` D10).
+    - Both rows are **visible in the Ledger** with distinct Transfer styling
+      (tracked but excluded from budget math).
+    - The Ledger's **day total for 2026-06-08** shows **$0.00** (or is absent)
+      — the checking outflow ($500) and the card credit ($500) both cancel out
+      of the expense column entirely, confirming neither leg leaked into the
+      day total.
+    - The category-spent totals and month **net leftover are unchanged** by
+      the transfer rows — add up the spending categories and verify the transfer
+      rows did not inflate or deflate any category's spend.
+    - If you check the rolling Other balance (envelope-summary header), it
+      must be the same as it was before the Pull that added the transfer rows.
+
+    This end-to-end check proves the D10 invariant: with both checking and a
+    credit card linked, the card-payment WITHDRAWAL on checking and the
+    corresponding CREDIT on the card account are both excluded from budget math,
+    so no double-count occurs.
 
 ### Pull (steady state)
 
-18. Click **Pull** again. The mock serves the empty steady-state page (no
+20. Click **Pull** again. The mock serves the empty steady-state page (no
     added/modified/removed). The inbox should still be empty. The cursor
     is stable: subsequent pulls keep returning the empty page (idempotent).
 
 ### Funds
 
-19. Navigate to the Funds view (if available in the current UI phase).
-20. Verify Emergency Buffer shows balance $5000 / target $6000 (below target,
+21. Navigate to the Funds view (if available in the current UI phase).
+22. Verify Emergency Buffer shows balance $5000 / target $6000 (below target,
     flagged with outstanding-obligation indicator if you did a buffer draw
     in step 10).
-21. Verify Vacation Savings shows $1200 with no target.
+23. Verify Vacation Savings shows $1200 with no target.
 
 ---
 
