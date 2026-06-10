@@ -95,6 +95,11 @@ struct TxnRow {
     comment: String,
     /// Amount as f64 — chorale `CellValue::Float` boundary only.
     amount_f64: f64,
+    /// `true` for an internal account movement (credit-card payment,
+    /// checking-to-savings transfer) — `BUDGET-TRANSFER-EXCLUDE-1`.
+    /// Drives the "Transfer" badge column; the row is already excluded from
+    /// the day-total server-side.
+    is_transfer: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +192,23 @@ fn txn_columns(category_options: Vec<String>) -> Vec<ColumnDef<TxnRow>> {
             CellValue::Text(t.description.clone())
         })
         .initial_width(240.0),
+        // READ-ONLY: transfer badge (BUDGET-TRANSFER-EXCLUDE-1 / SPEC §4.11 D10).
+        // Renders "Transfer" for internal account movements (credit-card payments,
+        // checking-to-savings) and blank for ordinary rows so the column is not
+        // visually noisy. No editor — this is a server-controlled flag. The day-total
+        // exclusion is already enforced server-side; this column makes it visible to
+        // Zach so a transfer reads as tracked-but-not-counted, not silently absent.
+        // TODO(visual-polish): switch to a CSS-badged cell once chorale supports a
+        // custom cell renderer. For now, the text label + `txn-row--transfer` row
+        // class (applied via DayDetail wrapper) conveys the distinction.
+        ColumnDef::new(ColumnId("type"), "Type", |t: &TxnRow| {
+            if t.is_transfer {
+                CellValue::Text("Transfer".to_owned())
+            } else {
+                CellValue::Text(String::new())
+            }
+        })
+        .initial_width(90.0),
         // EDITABLE: category — native dropdown over the user's category names
         // (cheat-sheet §3, EditorKind::Select). Grouped on; carries no aggregator
         // (it is the group key).
@@ -317,6 +339,7 @@ fn build_txn_rows(
                 category: t.category_name.clone().unwrap_or_default(),
                 comment: t.comment.clone().unwrap_or_default(),
                 amount_f64: money_to_cell_f64(t.amount),
+                is_transfer: t.is_transfer,
             },
         ));
     }

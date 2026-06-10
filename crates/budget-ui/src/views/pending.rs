@@ -475,6 +475,16 @@ fn PendingRowCard(
                         option { value: "spread", "Spread over months" }
                         option { value: "transfer", "Transfer / card payment (not an expense)" }
                     }
+                    // SPEC §4.11 D10 / BUDGET-TRANSFER-EXCLUDE-1: show a hint when
+                    // Plaid's category indicates a card payment or account transfer. The
+                    // hint appears only when the treatment is currently Transfer AND the
+                    // row carries a server-computed suggestion — it confirms WHY this
+                    // treatment is pre-selected without forcing the user to accept it.
+                    // Never auto-submitted; the user still clicks "Triage" to confirm.
+                    if treatment == TreatmentChoice::Transfer && row.suggested_transfer {
+                        span { class: "transfer-hint",
+                            "Plaid: looks like a card payment" }
+                    }
                 }
 
                 // Treatment-specific sub-fields.

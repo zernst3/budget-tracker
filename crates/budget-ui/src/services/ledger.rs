@@ -126,6 +126,13 @@ pub struct LedgerTransactionDto {
     /// placeholder. The day total only sums rows for which this is `true` AND
     /// which are not income/rollover.
     pub counts_in_budget: bool,
+    /// `true` for an internal account movement (credit-card payment,
+    /// checking-to-savings transfer) — `BUDGET-TRANSFER-EXCLUDE-1` /
+    /// `SPEC §4.11` D10. Tracked and displayed with distinct styling but EXCLUDED
+    /// from the day total and all budget math; the exclusion is enforced server-side
+    /// via `counts_in_month_expense_remaining`. This flag drives the ledger's
+    /// "Transfer" presentation badge so the row reads as tracked-but-not-counted.
+    pub is_transfer: bool,
 }
 
 /// The envelope-summary header for one month (`SPEC §7`).
@@ -336,6 +343,10 @@ fn build_days(
                 is_rollover: t.is_rollover,
                 is_income,
                 counts_in_budget: row_counts_in_budget,
+                // BUDGET-TRANSFER-EXCLUDE-1: surface the flag so the ledger can
+                // render a distinct "Transfer" badge; the server-side predicate
+                // already excluded this row from `total_expense`.
+                is_transfer: t.is_transfer,
             });
     }
 
@@ -769,6 +780,60 @@ mod tests {
             .expect("uncategorized row");
         assert!(u.category_id.is_none());
         assert!(u.category_name.is_none());
+    }
+
+    #[test]
+    fn transfer_flag_propagates_to_child_rows_and_is_excluded_from_day_total() {
+        // BUDGET-TRANSFER-EXCLUDE-1 / SPEC §4.11 D10: a transfer row (both legs)
+        // must appear in the child-table rows (tracked) but must NOT inflate the
+        // day-total (excluded from budget math, already enforced by the server-side
+        // predicate via counts_in_month_expense_remaining). This test proves the
+        // ledger's build_days propagates is_transfer correctly to the DTO flag AND
+        // that the transfer amount is absent from the day total — matching what the
+        // monthly-close net computation does (the same predicate).
+        let cat = CategoryId::generate();
+
+        // An ordinary in-month expense: -$50.
+        let direct = txn(day(2026, 7, 15), Some(cat), Money::from_minor(-5_000));
+
+        // The checking-outflow leg of a credit-card payment (transfer): -$400.
+        // is_transfer = true → excluded from day total AND month total.
+        let mut transfer_out = txn(day(2026, 7, 15), None, Money::from_minor(-40_000));
+        transfer_out.is_transfer = true;
+
+        // The card-side credit leg (transfer): +$400.
+        // Also is_transfer = true → excluded from day total (not an income offset).
+        let mut transfer_in = txn(day(2026, 7, 15), None, Money::from_minor(40_000));
+        transfer_in.is_transfer = true;
+
+        let names: HashMap<CategoryId, String> = HashMap::new();
+        let (days, month_total) = build_days(&[direct, transfer_out, transfer_in], &names, &[]);
+
+        // Only the -$50 ordinary expense counts toward the day and month total;
+        // the two transfer legs cancel in reality but are EACH excluded, not summed.
+        assert_eq!(month_total, Money::from_minor(-5_000));
+        assert_ne!(
+            month_total,
+            Money::from_minor(-45_000),
+            "transfer outflow must NOT inflate the day total"
+        );
+
+        // All three rows are surfaced in the child table (tracked, not hidden).
+        let rows = &days[0].transactions;
+        assert_eq!(
+            rows.len(),
+            3,
+            "all rows present — transfers tracked in ledger"
+        );
+
+        // The transfer rows carry is_transfer = true on the DTO, so the ledger UI
+        // can render the Transfer badge (independent oracle: flag matches what was set).
+        let transfer_rows: Vec<_> = rows.iter().filter(|r| r.is_transfer).collect();
+        assert_eq!(transfer_rows.len(), 2, "both transfer legs flagged");
+
+        // The ordinary expense row is NOT flagged as a transfer.
+        let non_transfer: Vec<_> = rows.iter().filter(|r| !r.is_transfer).collect();
+        assert_eq!(non_transfer.len(), 1);
     }
 
     // -- envelope -----------------------------------------------------------
