@@ -32,6 +32,7 @@ pub mod month;
 pub mod paycheck_config;
 pub mod plaid_api;
 pub mod plaid_item;
+pub mod portfolio;
 pub mod predicates;
 pub mod projections;
 pub mod repayment_obligation;
@@ -60,7 +61,7 @@ pub use error::{DomainError, RepositoryError, ValidationError};
 pub use fund::Fund;
 pub use ids::{
     AccountId, BudgetId, CategoryId, CategoryKey, FundId, MonthId, PaycheckConfigId, PlaidItemId,
-    RepaymentObligationId, TransactionId, UserId, WebauthnCredentialId,
+    PositionId, RepaymentObligationId, ReviewRunId, TransactionId, UserId, WebauthnCredentialId,
 };
 pub use money::Money;
 pub use month::Month;
@@ -70,6 +71,12 @@ pub use plaid_api::{
     PlaidProduct, PlaidSyncEngine, PlaidSyncPage, PlaidTransaction, SyncSummary,
 };
 pub use plaid_item::PlaidItem;
+pub use portfolio::{
+    AdvisorError, AdvisorOutput, CashBalance, CashBalanceSource, Claim, ClaimSubject,
+    InvestmentAdvisor, MarketDataError, MarketDataProvider, NetWorth, Position, PositionSource,
+    PriceProvenance, PriceQuote, PricedPosition, PortfolioSnapshot, Recommendation, ReviewRun,
+    ReviewTerminalState, Ticker, UnverifiedReason, ValidationOutcome,
+};
 pub use predicates::{
     FixedSettlement, counts_in_budget, counts_in_month_expense_remaining, envelope_category_spent,
     fixed_category_spent, plaid_category_suggests_transfer,
@@ -77,8 +84,9 @@ pub use predicates::{
 pub use projections::{CategorySpent, MonthNet};
 pub use repayment_obligation::RepaymentObligation;
 pub use repositories::{
-    BudgetRepository, FundRepository, MonthRepository, PaycheckConfigRepository,
-    PlaidItemRepository, TransactionRepository, UserRepository,
+    BudgetRepository, CashBalanceRepository, FundRepository, MonthRepository,
+    PaycheckConfigRepository, PlaidItemRepository, PositionRepository, ReviewRunRepository,
+    TransactionRepository, UserRepository,
 };
 pub use transaction::Transaction;
 pub use uow::{UnitOfWork, UowFuture, UowProvider, UowProviderExt};

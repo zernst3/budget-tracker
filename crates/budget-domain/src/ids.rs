@@ -114,6 +114,15 @@ uuid_newtype!(
     /// `SPEC §5` / `§9.1`, `BUDGET-AUTH-GATE-1`).
     WebauthnCredentialId
 );
+uuid_newtype!(
+    /// Identifies a [`crate::portfolio::Position`].
+    PositionId
+);
+uuid_newtype!(
+    /// Identifies a [`crate::portfolio::ReviewRun`] (the audit row for one
+    /// portfolio-review invocation).
+    ReviewRunId
+);
 
 #[cfg(test)]
 mod tests {

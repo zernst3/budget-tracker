@@ -25,9 +25,11 @@ use crate::ids::{
     AccountId, BudgetId, CategoryId, FundId, MonthId, PlaidItemId, RepaymentObligationId,
     TransactionId, UserId,
 };
+use crate::ids::PositionId;
 use crate::month::Month;
 use crate::paycheck_config::PaycheckConfig;
 use crate::plaid_item::PlaidItem;
+use crate::portfolio::{CashBalanceSource, Position, PositionSource, ReviewRun};
 use crate::projections::CategorySpent;
 use crate::repayment_obligation::RepaymentObligation;
 use crate::transaction::Transaction;
@@ -540,5 +542,78 @@ pub trait PaycheckConfigRepository: Send + Sync {
         &self,
         config: &PaycheckConfig,
         uow: Option<&dyn UnitOfWork>,
+    ) -> Result<(), RepositoryError>;
+}
+
+/// Persistence for the [`ReviewRun`] audit aggregate (`REPO-1`,
+/// `SQL-AUDIT-COLUMNS-1`).
+///
+/// `review_runs` is an append-only system log: there is no update or delete
+/// surface. The single write is [`ReviewRunRepository::insert`], which takes a
+/// `&mut dyn UnitOfWork` directly (not the `Option<&dyn UnitOfWork>` shape used
+/// by the editable aggregates) because the portfolio-review use-case always
+/// persists the run inside its own explicit transaction
+/// (`ARCH-EXPLICIT-TX-1` / `RUST-DOMAIN-7`).
+#[async_trait]
+pub trait ReviewRunRepository: Send + Sync {
+    /// Append one review-run audit row, enlisted in the caller's transaction.
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure.
+    async fn insert(
+        &self,
+        run: &ReviewRun,
+        uow: &mut dyn UnitOfWork,
+    ) -> Result<(), RepositoryError>;
+
+    /// All review runs for a user (newest-first history).
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure.
+    async fn list_for_user(&self, user_id: UserId) -> Result<Vec<ReviewRun>, RepositoryError>;
+}
+
+/// Persistence for the [`Position`] aggregate (`REPO-1`).
+///
+/// Extends the read-only [`PositionSource`] port (which the portfolio-review
+/// use-case depends on for grounding) with the write surface the manual
+/// positions UI needs.
+#[async_trait]
+pub trait PositionRepository: PositionSource {
+    /// Insert a new position.
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure.
+    async fn insert(&self, position: &Position) -> Result<(), RepositoryError>;
+
+    /// Update an existing position.
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure.
+    async fn update(&self, position: &Position) -> Result<(), RepositoryError>;
+
+    /// Delete a user's position by id (`user_id`-scoped, `SPEC §9.1` defense in
+    /// depth).
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure.
+    async fn delete(&self, user_id: UserId, id: PositionId) -> Result<(), RepositoryError>;
+}
+
+/// Persistence for the [`crate::portfolio::CashBalance`] aggregate (`REPO-1`,
+/// `BUDGET-CASH-1`).
+///
+/// Extends the read-only [`CashBalanceSource`] port with the upsert the manual
+/// balances UI needs. A balance is keyed by `(user_id, account_label)`, so the
+/// single write is an upsert.
+#[async_trait]
+pub trait CashBalanceRepository: CashBalanceSource {
+    /// Insert or update a cash balance for the user, keyed by account label.
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure.
+    async fn upsert(
+        &self,
+        balance: &crate::portfolio::CashBalance,
     ) -> Result<(), RepositoryError>;
 }
