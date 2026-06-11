@@ -275,9 +275,7 @@ mod tests {
     use budget_domain::month::Month;
     use budget_domain::repositories::{BudgetRepository, MonthRepository};
     use budget_domain::transaction::Transaction;
-    use budget_domain::{
-        Budget, Category, CategorySpent, MonthNet, TransactionRepository, UnitOfWork,
-    };
+    use budget_domain::{Budget, Category, CategorySpent, TransactionRepository, UnitOfWork};
 
     // ---------------------------------------------------------------------------
     // Fakes (DB-free, in-memory)
@@ -404,25 +402,6 @@ mod tests {
                     spent: Money::from_decimal(spent),
                 })
                 .collect())
-        }
-
-        async fn month_net(&self, month_id: MonthId) -> Result<MonthNet, RepositoryError> {
-            let net: Decimal = self
-                .store
-                .lock()
-                .unwrap()
-                .values()
-                .filter(|t| {
-                    t.month_id == month_id
-                        && budget_domain::counts_in_budget(t.status)
-                        && t.matched_transaction_id.is_none()
-                })
-                .map(|t| t.amount.as_decimal())
-                .sum();
-            Ok(MonthNet {
-                month_id,
-                net: Money::from_decimal(net),
-            })
         }
 
         async fn delete(

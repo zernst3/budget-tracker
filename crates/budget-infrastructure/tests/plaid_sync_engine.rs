@@ -36,7 +36,7 @@ use budget_domain::plaid_api::{
     PlaidSyncPage, PlaidTransaction,
 };
 use budget_domain::plaid_item::PlaidItem;
-use budget_domain::projections::{CategorySpent, MonthNet};
+use budget_domain::projections::CategorySpent;
 use budget_domain::repositories::{MonthRepository, PlaidItemRepository, TransactionRepository};
 use budget_domain::transaction::Transaction;
 use budget_domain::uow::{UnitOfWork, UowFuture, UowProvider};
@@ -257,13 +257,6 @@ impl TransactionRepository for FakeTxnRepo {
         _month_id: MonthId,
     ) -> Result<Vec<CategorySpent>, RepositoryError> {
         Ok(vec![])
-    }
-
-    async fn month_net(&self, month_id: MonthId) -> Result<MonthNet, RepositoryError> {
-        Ok(MonthNet {
-            month_id,
-            net: budget_domain::Money::ZERO,
-        })
     }
 
     async fn save(

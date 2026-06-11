@@ -31,7 +31,8 @@
 //!     onboarding, the first step-4 `MonthLifecycleService::ensure_current_month`
 //!     into the NEXT month posts a rollover whose amount matches an independent
 //!     `rust_decimal` oracle that re-derives the genesis-month net from the seeded
-//!     rows without going through the production `month_net` aggregate.
+//!     rows without going through the production net path
+//!     (`MonthLifecycleService::month_net_for`).
 //!
 //! (e) **$0 CATEGORY — no spurious opening charge** (`SPEC §4.6`): a category
 //!     whose `spend_so_far` is `Money::ZERO` produces no opening-charge row.
@@ -346,6 +347,24 @@ struct MemTxnRepo {
 }
 
 impl MemTxnRepo {
+    /// Independent net oracle (test-only inherent helper, not a trait method —
+    /// the production `TransactionRepository::month_net` SQL aggregate was
+    /// deleted, `DRIFT_REPORT` MUST-FIX #2 / SHOULD-FIX #5). Does NOT call the
+    /// production predicate. Inclusion: settled + expected
+    /// (`BUDGET-STATUS-DRIVES-INCLUSION-1`). is_fund_draw rows are excluded (D6
+    /// Model A: already expensed at contribution time,
+    /// `BUDGET-NO-DOUBLE-CHARGE-1`). The opening rows seeded by OnboardingService
+    /// are is_fund_draw=false, so they COUNT here.
+    async fn month_net(&self, month_id: MonthId) -> Result<MonthNet, RepositoryError> {
+        let g = self.txns.lock().map_err(poisoned)?;
+        let net: Money = g
+            .iter()
+            .filter(|t| t.month_id == month_id && counts_independently(t.status) && !t.is_fund_draw)
+            .map(|t| t.amount)
+            .sum();
+        Ok(MonthNet { month_id, net })
+    }
+
     fn all(&self) -> Vec<Transaction> {
         self.txns.lock().unwrap().clone()
     }
@@ -467,21 +486,6 @@ impl TransactionRepository for MemTxnRepo {
         _month_id: MonthId,
     ) -> Result<Vec<CategorySpent>, RepositoryError> {
         Ok(Vec::new())
-    }
-
-    async fn month_net(&self, month_id: MonthId) -> Result<MonthNet, RepositoryError> {
-        // Independent net derivation — does NOT call the production predicate.
-        // Inclusion: settled + expected (BUDGET-STATUS-DRIVES-INCLUSION-1).
-        // is_fund_draw rows are excluded (D6 Model A: already expensed at
-        // contribution time, BUDGET-NO-DOUBLE-CHARGE-1). The opening rows seeded
-        // by OnboardingService are is_fund_draw=false, so they COUNT here.
-        let g = self.txns.lock().map_err(poisoned)?;
-        let net: Money = g
-            .iter()
-            .filter(|t| t.month_id == month_id && counts_independently(t.status) && !t.is_fund_draw)
-            .map(|t| t.amount)
-            .sum();
-        Ok(MonthNet { month_id, net })
     }
 
     async fn save(
@@ -1331,8 +1335,8 @@ async fn no_transaction_is_dated_before_tracking_start_date_month_start() {
 ///
 /// This is the critical end-to-end seam test: the genesis month's seeded
 /// transactions (opening charges + starting-Other) feed into the lifecycle's
-/// `month_net` query, which the lifecycle then uses to post the next month's
-/// rollover. An off-by-one in the cutover boundary, a double-count of the
+/// `month_net_for` computation, which the lifecycle then uses to post the next
+/// month's rollover. An off-by-one in the cutover boundary, a double-count of the
 /// buffer balance, or a sign error in any opening row would produce a wrong
 /// rollover and be caught here.
 #[tokio::test]

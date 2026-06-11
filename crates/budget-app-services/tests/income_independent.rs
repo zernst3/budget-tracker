@@ -96,7 +96,7 @@ use budget_domain::repositories::{
 };
 use budget_domain::transaction::Transaction;
 use budget_domain::uow::{UnitOfWork, UowFuture, UowProvider};
-use budget_domain::{CategorySpent, MonthNet, MonthRepository, RepositoryError};
+use budget_domain::{CategorySpent, MonthRepository, RepositoryError};
 
 // ===========================================================================
 // Deterministic PRNG (splitmix64) — same approach as other independent tests.
@@ -412,23 +412,6 @@ impl TransactionRepository for MemTxnRepo {
         _month_id: MonthId,
     ) -> Result<Vec<CategorySpent>, RepositoryError> {
         Ok(Vec::new())
-    }
-
-    async fn month_net(&self, month_id: MonthId) -> Result<MonthNet, RepositoryError> {
-        // Independent inclusion: settled + expected count; pending excluded.
-        let g = self.txns.lock().map_err(poisoned)?;
-        let net: Money = g
-            .iter()
-            .filter(|t| {
-                t.month_id == month_id
-                    && matches!(
-                        t.status,
-                        TransactionStatus::Settled | TransactionStatus::Expected
-                    )
-            })
-            .map(|t| t.amount)
-            .sum();
-        Ok(MonthNet { month_id, net })
     }
 
     async fn save(

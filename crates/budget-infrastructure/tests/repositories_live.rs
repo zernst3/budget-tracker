@@ -3,10 +3,9 @@
 //! Gated on `DATABASE_URL` (no-op in CI until Neon is provisioned, SPEC §12).
 //! When set, the suite proves:
 //!   1. a user save -> find round-trip returns domain types (`REPO-2`),
-//!   2. the SQL aggregates (`category_spent_for_month`, `month_net`) honor the
-//!      inclusion polarity (`BUDGET-STATUS-DRIVES-INCLUSION-1`: settled +
-//!      expected count, pending excluded) and aggregate in one query
-//!      (`DB-NPLUSONE-1`),
+//!   2. the SQL aggregate (`category_spent_for_month`) honors the inclusion
+//!      polarity (`BUDGET-STATUS-DRIVES-INCLUSION-1`: settled + expected count,
+//!      pending excluded) and aggregates in one query (`DB-NPLUSONE-1`),
 //!   3. the unit of work rolls back on a closure error (`REPO-6`/`REPO-10`).
 //!
 //! Run against a throwaway database:
@@ -293,21 +292,9 @@ async fn aggregates_honor_inclusion_polarity_in_one_query() {
     assert_eq!(spent[0].category_id, category_id);
     assert_eq!(spent[0].spent, Money::from_major(-140));
 
-    // month_net: same polarity, single scalar.
-    let net = txns.month_net(month_id).await.expect("month net");
-    assert_eq!(net.month_id, month_id);
-    assert_eq!(net.net, Money::from_major(-140));
-
-    // An empty month nets to zero, never None.
-    let empty_month_id = MonthId::generate();
-    let empty_month = Month {
-        id: empty_month_id,
-        month: 3,
-        ..sample_month(empty_month_id, user_id, budget_id)
-    };
-    months.save(&empty_month, None).await.expect("empty month");
-    let empty_net = txns.month_net(empty_month_id).await.expect("empty net");
-    assert_eq!(empty_net.net, Money::ZERO);
+    // (month_net live assertions removed with the deleted raw-SQL aggregate —
+    // DRIFT_REPORT MUST-FIX #2 / SHOULD-FIX #5. Net/rollover is exercised through
+    // MonthLifecycleService::month_net_for in budget-app-services.)
 }
 
 #[tokio::test]

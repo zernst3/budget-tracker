@@ -44,7 +44,6 @@ use budget_domain::ids::{
 };
 use budget_domain::money::Money;
 use budget_domain::month::Month;
-use budget_domain::predicates::counts_in_budget;
 use budget_domain::repayment_obligation::RepaymentObligation;
 use budget_domain::repositories::{
     BudgetRepository, FundRepository, MonthRepository, TransactionRepository, UserRepository,
@@ -53,7 +52,7 @@ use budget_domain::transaction::Transaction;
 use budget_domain::uow::{UnitOfWork, UowFuture, UowProvider};
 use budget_domain::user::User;
 use budget_domain::validated::Email;
-use budget_domain::{CategorySpent, MonthNet, RepositoryError};
+use budget_domain::{CategorySpent, RepositoryError};
 
 use crate::income::FixedExpectation;
 use crate::month_lifecycle::MonthLifecycleService;
@@ -430,16 +429,6 @@ impl TransactionRepository for FakeTransactionRepo {
         _month_id: MonthId,
     ) -> Result<Vec<CategorySpent>, RepositoryError> {
         Ok(Vec::new())
-    }
-    async fn month_net(&self, month_id: MonthId) -> Result<MonthNet, RepositoryError> {
-        let store = self.store.lock().map_err(poisoned)?;
-        let net: Money = store
-            .txns
-            .iter()
-            .filter(|t| t.month_id == month_id && counts_in_budget(t.status))
-            .map(|t| t.amount)
-            .sum();
-        Ok(MonthNet { month_id, net })
     }
     async fn save(
         &self,

@@ -1,12 +1,14 @@
 //! `SeaORM` [`TransactionRepository`] implementation (`REPO-1`).
 //!
 //! The widest repository: row CRUD, the rollover/Plaid-dedup/expected lookups,
-//! and the two computed read surfaces (per-category spent, month net) that the
-//! budget math depends on. Those two are aggregated in a SINGLE SQL query each
-//! (`DB-NPLUSONE-1`) and returned as domain projection types
-//! ([`CategorySpent`] / [`MonthNet`], `REPO-9`).
+//! and the per-category spent computed read surface that the budget math depends
+//! on. It is aggregated in a SINGLE SQL query (`DB-NPLUSONE-1`) and returned as a
+//! domain projection type ([`CategorySpent`], `REPO-9`). (The month-net aggregate
+//! was removed: all production net/rollover computation goes through
+//! [`budget_app_services::MonthLifecycleService::month_net_for`], the single
+//! authoritative path — see `DRIFT_REPORT` MUST-FIX #2 / SHOULD-FIX #5.)
 //!
-//! The status filter on both aggregates encodes
+//! The status filter on the aggregate encodes
 //! `BUDGET-STATUS-DRIVES-INCLUSION-1` exactly: `status IN ('settled',
 //! 'expected')` is the SQL form of [`budget_domain::counts_in_budget`] being
 //! `true` (pending excluded). The canonical polarity still lives in that
@@ -22,7 +24,7 @@ use uuid::Uuid;
 use budget_domain::RepositoryError;
 use budget_domain::ids::{CategoryId, MonthId, TransactionId, UserId};
 use budget_domain::money::Money;
-use budget_domain::projections::{CategorySpent, MonthNet};
+use budget_domain::projections::CategorySpent;
 use budget_domain::repositories::TransactionRepository;
 use budget_domain::transaction::Transaction;
 use budget_domain::uow::UnitOfWork;
@@ -67,13 +69,6 @@ struct CategorySpentRow {
     spent: rust_decimal::Decimal,
 }
 
-/// Infra-local raw-query row for the month-net aggregate (see
-/// [`CategorySpentRow`] for the pattern rationale).
-#[derive(Debug, FromQueryResult)]
-struct MonthNetRow {
-    net: rust_decimal::Decimal,
-}
-
 // The per-category spent aggregate SQL (REPO-9, RUST-SEAORM-RAW-SQL-ESCAPE-1).
 //
 // status IN ('settled','expected') == counts_in_budget()==true
@@ -107,28 +102,6 @@ const CATEGORY_SPENT_SQL: &str = "SELECT category_id, SUM(amount) AS spent \
        AND is_fund_draw = false \
        AND is_transfer = false \
      GROUP BY category_id";
-
-// The month-net scalar aggregate SQL (REPO-9, RUST-SEAORM-RAW-SQL-ESCAPE-1).
-//
-// COALESCE so an empty month nets to 0 rather than NULL (the trait contract returns a
-// zero net, never None). Same inclusion polarity as CATEGORY_SPENT_SQL
-// (BUDGET-STATUS-DRIVES-INCLUSION-1). matched_transaction_id IS NULL excludes a
-// matched expected placeholder (BUDGET-SETTLE-ON-MATCH-1) so the placeholder/real
-// pair counts once.
-//
-// is_transfer = false mirrors the `&& !txn.is_transfer` term of
-// counts_in_month_expense_remaining (BUDGET-TRANSFER-EXCLUDE-1 / SPEC §4.11 D10): an
-// internal transfer is excluded from the month net on BOTH legs — the funding-account
-// outflow (a negative amount that would understate net as spending) AND the
-// destination-account inflow (a positive amount that would wrongly inflate net as if
-// it were income). Excluding both keeps the rolling Other free of any transfer leak.
-// Source: transactions (m0001, is_transfer from m0006).
-const MONTH_NET_SQL: &str = "SELECT COALESCE(SUM(amount), 0) AS net \
-     FROM transactions \
-     WHERE month_id = $1 \
-       AND status IN ('settled', 'expected') \
-       AND matched_transaction_id IS NULL \
-       AND is_transfer = false";
 
 #[async_trait]
 impl TransactionRepository for PostgresTransactionRepository {
@@ -287,23 +260,6 @@ impl TransactionRepository for PostgresTransactionRepository {
             .collect())
     }
 
-    async fn month_net(&self, month_id: MonthId) -> Result<MonthNet, RepositoryError> {
-        // Single scalar aggregate; the WHERE clause (including the
-        // BUDGET-TRANSFER-EXCLUDE-1 `is_transfer = false` mirror) and its rule
-        // cross-references are documented on MONTH_NET_SQL.
-        let stmt = Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            MONTH_NET_SQL,
-            [month_id.value().into()],
-        );
-        let row = MonthNetRow::find_by_statement(stmt)
-            .one(&self.db)
-            .await
-            .map_err(map_db_err)?;
-        let net = row.map_or(Money::ZERO, |r| Money::from_decimal(r.net));
-        Ok(MonthNet { month_id, net })
-    }
-
     async fn save(
         &self,
         transaction: &Transaction,
@@ -343,7 +299,7 @@ mod sql_tests {
     //! exclusion behaviour is covered by the domain predicate suite and the
     //! `DATABASE_URL`-gated live integration tests.
 
-    use super::{CATEGORY_SPENT_SQL, MONTH_NET_SQL};
+    use super::CATEGORY_SPENT_SQL;
 
     #[test]
     fn category_spent_sql_excludes_transfers() {
@@ -358,17 +314,5 @@ mod sql_tests {
         assert!(CATEGORY_SPENT_SQL.contains("is_fund_draw = false"));
         assert!(CATEGORY_SPENT_SQL.contains("matched_transaction_id IS NULL"));
         assert!(CATEGORY_SPENT_SQL.contains("status IN ('settled', 'expected')"));
-    }
-
-    #[test]
-    fn month_net_sql_excludes_transfers() {
-        // BUDGET-TRANSFER-EXCLUDE-1: the month net must mirror the predicate too, so a
-        // transfer leg (negative outflow OR positive inflow) never moves the net.
-        assert!(
-            MONTH_NET_SQL.contains("is_transfer = false"),
-            "month-net aggregate must exclude transfers (is_transfer = false)"
-        );
-        assert!(MONTH_NET_SQL.contains("matched_transaction_id IS NULL"));
-        assert!(MONTH_NET_SQL.contains("status IN ('settled', 'expected')"));
     }
 }

@@ -28,7 +28,7 @@ use crate::ids::{
 use crate::month::Month;
 use crate::paycheck_config::PaycheckConfig;
 use crate::plaid_item::PlaidItem;
-use crate::projections::{CategorySpent, MonthNet};
+use crate::projections::CategorySpent;
 use crate::repayment_obligation::RepaymentObligation;
 use crate::transaction::Transaction;
 use crate::uow::UnitOfWork;
@@ -312,19 +312,6 @@ pub trait TransactionRepository: Send + Sync {
         &self,
         month_id: MonthId,
     ) -> Result<Vec<CategorySpent>, RepositoryError>;
-
-    /// The net position of a month — the signed sum of every budget-counting
-    /// transaction in it, computed in a single SQL aggregate (`REPO-9` /
-    /// `RUST-SEAORM-PROJECTION-TYPES-1`; `DB-NPLUSONE-1`).
-    ///
-    /// The same inclusion polarity applies (`BUDGET-STATUS-DRIVES-INCLUSION-1`).
-    /// This is the rolling-Other input (`SPEC §4.3`, build step 4). Returns a
-    /// [`MonthNet`] with a zero `net` when the month has no counting
-    /// transactions (rather than `None`), so callers always get a usable figure.
-    ///
-    /// # Errors
-    /// [`RepositoryError`] on any persistence failure.
-    async fn month_net(&self, month_id: MonthId) -> Result<MonthNet, RepositoryError>;
 
     /// Insert or update a transaction. Used for manual entry, Plaid `added`,
     /// posting the rollover row, and recording a settlement/match

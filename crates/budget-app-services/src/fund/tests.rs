@@ -43,7 +43,7 @@ use budget_domain::repayment_obligation::RepaymentObligation;
 use budget_domain::repositories::{BudgetRepository, FundRepository, TransactionRepository};
 use budget_domain::transaction::Transaction;
 use budget_domain::uow::{UnitOfWork, UowFuture, UowProvider};
-use budget_domain::{CategorySpent, MonthNet, RepositoryError};
+use budget_domain::{CategorySpent, RepositoryError};
 
 use super::*;
 
@@ -411,13 +411,6 @@ impl TransactionRepository for FakeTransactionRepo {
         _month_id: MonthId,
     ) -> Result<Vec<CategorySpent>, RepositoryError> {
         Ok(Vec::new())
-    }
-
-    async fn month_net(&self, month_id: MonthId) -> Result<MonthNet, RepositoryError> {
-        Ok(MonthNet {
-            month_id,
-            net: Money::ZERO,
-        })
     }
 
     async fn save(

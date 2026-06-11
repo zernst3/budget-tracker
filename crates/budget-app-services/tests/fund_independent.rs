@@ -93,7 +93,7 @@ use budget_domain::repayment_obligation::RepaymentObligation;
 use budget_domain::transaction::Transaction;
 use budget_domain::uow::{UnitOfWork, UowFuture, UowProvider};
 use budget_domain::{
-    BudgetRepository, CategorySpent, FundRepository, MonthNet, MonthRepository, RepositoryError,
+    BudgetRepository, CategorySpent, FundRepository, MonthRepository, RepositoryError,
     TransactionRepository,
 };
 
@@ -389,16 +389,6 @@ impl TransactionRepository for MemTxnRepo {
         _month_id: MonthId,
     ) -> Result<Vec<CategorySpent>, RepositoryError> {
         Ok(Vec::new())
-    }
-
-    async fn month_net(&self, month_id: MonthId) -> Result<MonthNet, RepositoryError> {
-        let g = self.txns.lock().map_err(poisoned)?;
-        let net: Money = g
-            .iter()
-            .filter(|t| t.month_id == month_id && counts_independently(t.status))
-            .map(|t| t.amount)
-            .sum();
-        Ok(MonthNet { month_id, net })
     }
 
     async fn save(

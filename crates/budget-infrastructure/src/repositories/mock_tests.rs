@@ -3,8 +3,8 @@
 //! These tests use `sea_orm::MockDatabase` to exercise:
 //!   - predicate-bearing read surfaces (settled/expected counted, pending
 //!     excluded — `BUDGET-STATUS-DRIVES-INCLUSION-1`)
-//!   - the `category_spent_for_month` and `month_net` raw-SQL aggregation
-//!     paths and their `Model->domain` mapping (`REPO-9`)
+//!   - the `category_spent_for_month` raw-SQL aggregation path and its
+//!     `Model->domain` mapping (`REPO-9`)
 //!   - the rollover-row uniqueness predicate (`BUDGET-ROLLOVER-INTEGRITY-1`)
 //!   - the `is_rollover_bucket` predicate on the budget side
 //!   - at least one `UoW` commit path via the `SeaOrmUow` downcast
@@ -167,15 +167,6 @@ fn category_spent_mock_row(category_id: Uuid, spent: Decimal) -> MockRow {
     let mut map: BTreeMap<String, Value> = BTreeMap::new();
     map.insert("category_id".to_owned(), category_id.into());
     map.insert("spent".to_owned(), spent.into());
-    map.into_mock_row()
-}
-
-/// Build a `MockRow` for a `MonthNetRow` (raw SQL aggregate).
-///
-/// The derive calls `row.try_get_nullable("", "net")`.
-fn month_net_mock_row(net: Decimal) -> MockRow {
-    let mut map: BTreeMap<String, Value> = BTreeMap::new();
-    map.insert("net".to_owned(), net.into());
     map.into_mock_row()
 }
 
@@ -1012,80 +1003,9 @@ mod transaction_repo {
         assert_eq!(result[0].spent, Money::from_minor(-14000));
     }
 
-    // --- month_net (raw SQL scalar aggregate, REPO-9) -----------------------
-
-    #[tokio::test]
-    async fn month_net_returns_zero_for_empty_month() {
-        // COALESCE(SUM(amount), 0) → 0 when no rows match. The mock returns a
-        // single row with net = 0 (matching what Postgres emits).
-        let month_id = Uuid::new_v4();
-        let row = month_net_mock_row(Decimal::ZERO);
-        let db = MockDatabase::new(DbBackend::Postgres)
-            .append_query_results([[row]])
-            .into_connection();
-        let repo = PostgresTransactionRepository::new(db);
-        let result = repo
-            .month_net(MonthId::new(month_id))
-            .await
-            .expect("no error");
-        assert_eq!(result.month_id, MonthId::new(month_id));
-        assert_eq!(
-            result.net,
-            Money::ZERO,
-            "empty month nets to zero, never None"
-        );
-    }
-
-    #[tokio::test]
-    async fn month_net_maps_negative_net_correctly() {
-        // settled -$100 + expected -$40 = -$140 (pending -$999 excluded)
-        let month_id = Uuid::new_v4();
-        let row = month_net_mock_row(Decimal::new(-14000, 2));
-        let db = MockDatabase::new(DbBackend::Postgres)
-            .append_query_results([[row]])
-            .into_connection();
-        let repo = PostgresTransactionRepository::new(db);
-        let result = repo
-            .month_net(MonthId::new(month_id))
-            .await
-            .expect("no error");
-        assert_eq!(result.net, Money::from_minor(-14000));
-        assert_eq!(result.month_id, MonthId::new(month_id));
-    }
-
-    #[tokio::test]
-    async fn month_net_maps_positive_net_income_month() {
-        // Paycheck month where income > expenses.
-        let month_id = Uuid::new_v4();
-        let row = month_net_mock_row(Decimal::new(35000, 2)); // +$350.00
-        let db = MockDatabase::new(DbBackend::Postgres)
-            .append_query_results([[row]])
-            .into_connection();
-        let repo = PostgresTransactionRepository::new(db);
-        let result = repo
-            .month_net(MonthId::new(month_id))
-            .await
-            .expect("no error");
-        assert!(result.net.is_positive());
-        assert_eq!(result.net, Money::from_minor(35000));
-    }
-
-    #[tokio::test]
-    async fn month_net_no_rows_returned_falls_back_to_zero() {
-        // Edge: if the aggregate returns NO rows at all (unlikely with COALESCE,
-        // but our fallback logic in the repo handles it).
-        let month_id = Uuid::new_v4();
-        let db = MockDatabase::new(DbBackend::Postgres)
-            .append_query_results([Vec::<MockRow>::new()])
-            .into_connection();
-        let repo = PostgresTransactionRepository::new(db);
-        let result = repo
-            .month_net(MonthId::new(month_id))
-            .await
-            .expect("no error");
-        assert_eq!(result.net, Money::ZERO, "fallback to zero, never None");
-        assert_eq!(result.month_id, MonthId::new(month_id));
-    }
+    // (month_net mock tests removed with the deleted raw-SQL aggregate —
+    // DRIFT_REPORT MUST-FIX #2 / SHOULD-FIX #5. The single net path is
+    // MonthLifecycleService::month_net_for, covered in budget-app-services.)
 
     // --- save / delete (exec paths) -----------------------------------------
 

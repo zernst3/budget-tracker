@@ -42,7 +42,7 @@ use budget_domain::repositories::{
 };
 use budget_domain::transaction::Transaction;
 use budget_domain::uow::{UnitOfWork, UowFuture, UowProvider};
-use budget_domain::{CategorySpent, MonthNet, RepositoryError};
+use budget_domain::{CategorySpent, RepositoryError};
 
 use crate::income::{SemimonthlyFixedExpectation, UnwiredIncomeStub};
 
@@ -418,17 +418,6 @@ impl TransactionRepository for FakeTransactionRepo {
         Ok(Vec::new())
     }
 
-    async fn month_net(&self, month_id: MonthId) -> Result<MonthNet, RepositoryError> {
-        let store = self.store.lock().map_err(poisoned)?;
-        let net: Money = store
-            .txns
-            .iter()
-            .filter(|t| t.month_id == month_id && counts_in_budget(t.status))
-            .map(|t| t.amount)
-            .sum();
-        Ok(MonthNet { month_id, net })
-    }
-
     async fn save(
         &self,
         transaction: &Transaction,
@@ -624,9 +613,9 @@ fn ymd(y: i32, m: u32, d: u32) -> NaiveDate {
 /// Build a harness with one open-ended budget version + a rollover bucket and a
 /// $2,000 semimonthly expectation (so expected income = $4,000/month).
 fn harness() -> Harness {
-    harness_with_income(Arc::new(SemimonthlyFixedExpectation::new(Money::from_major(
-        2_000,
-    ))))
+    harness_with_income(Arc::new(SemimonthlyFixedExpectation::new(
+        Money::from_major(2_000),
+    )))
 }
 
 /// Build a harness with a caller-supplied income expectation, so the
@@ -924,6 +913,66 @@ async fn rollover_proceeds_under_unwired_stub_when_no_income_rows() {
         rollover.amount,
         Money::from_major(-100),
         "with no income row the net is just the expense remaining (no income term)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Single surviving net path EXCLUDES fund draws + income from expense_remaining
+// (DRIFT_REPORT MUST-FIX #2 / SHOULD-FIX #5: the deleted MONTH_NET_SQL silently
+// SUMMED them; month_net_for / counts_in_month_expense_remaining does not).
+// PROC-REGRESSION-TEST-1 / ORCH-NEW-PATH-TESTS-1.
+// ---------------------------------------------------------------------------
+
+/// Locks the correct behavior on the ONE remaining net path after deleting the
+/// redundant `month_net` SQL aggregate.
+///
+/// The deleted `MONTH_NET_SQL` was a bare `COALESCE(SUM(amount), 0)` over
+/// settled/expected rows with NO `is_fund_draw` and NO income exclusion — so a
+/// fund-draw row (positive, already expensed at contribution time,
+/// `BUDGET-FUND-EARMARK-1`/`BUDGET-NO-DOUBLE-CHARGE-1`) and an income row would
+/// both have been summed straight into the net. Here, with a fund draw (+$500),
+/// an income row (+$4,000, exactly the expected figure), and one ordinary
+/// expense (−$100), the deleted path would have returned +$4,400. The surviving
+/// `month_net_for` (which folds `counts_in_month_expense_remaining`) excludes the
+/// fund draw from expense_remaining and nets income through the
+/// `(actual_income − expected_income)` term, yielding −$100.
+#[tokio::test]
+async fn month_net_for_excludes_fund_draws_and_income_single_path() {
+    let h = harness(); // semimonthly $2,000 => expected $4,000/month
+    let exp_cat = add_expense_category(&h, "Groceries");
+    let fund_cat = add_fund_category(&h, "Insurance fund");
+
+    let jan = h
+        .service
+        .ensure_current_month(h.user_id, ny_noon(2026, 1, 10))
+        .await
+        .expect("init jan");
+
+    // Income row: +$4,000, exactly the expected figure (no income variance).
+    let mut income = base_txn(&h, jan.id, Money::from_major(4_000));
+    income.income_kind = Some(IncomeKind::Budgeted);
+    push_txn(&h, income);
+
+    // Fund-draw row: a POSITIVE +$500 marked is_fund_draw. The deleted SQL would
+    // have summed this into the net; the predicate excludes it.
+    let mut fund_draw = base_txn(&h, jan.id, Money::from_major(500));
+    fund_draw.category_id = Some(fund_cat);
+    fund_draw.is_fund_draw = true;
+    push_txn(&h, fund_draw);
+
+    // One ordinary expense: −$100 (the only row that should move the net).
+    let mut expense = base_txn(&h, jan.id, Money::from_major(-100));
+    expense.category_id = Some(exp_cat);
+    push_txn(&h, expense);
+
+    let net = h.service.month_net_for(&jan).await.expect("month net");
+
+    assert_eq!(
+        net,
+        Money::from_major(-100),
+        "the surviving path excludes the +$500 fund draw and nets income via the \
+         income term; only the −$100 ordinary expense remains (the deleted \
+         MONTH_NET_SQL would have wrongly returned +$4,400)"
     );
 }
 

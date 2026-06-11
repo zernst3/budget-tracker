@@ -48,7 +48,7 @@ use budget_domain::plaid_api::{
 };
 use budget_domain::plaid_item::PlaidItem;
 use budget_domain::predicates::{FixedSettlement, fixed_category_spent};
-use budget_domain::projections::{CategorySpent, MonthNet};
+use budget_domain::projections::CategorySpent;
 use budget_domain::repositories::{MonthRepository, PlaidItemRepository, TransactionRepository};
 use budget_domain::transaction::Transaction;
 use budget_domain::uow::{UnitOfWork, UowFuture, UowProvider};
@@ -282,22 +282,6 @@ impl TransactionRepository for FakeTxnRepo {
             .into_iter()
             .map(|(category_id, spent)| CategorySpent { category_id, spent })
             .collect())
-    }
-
-    async fn month_net(&self, month_id: MonthId) -> Result<MonthNet, RepositoryError> {
-        let rows = self.rows.lock().map_err(poisoned)?;
-        let net = rows
-            .iter()
-            .filter(|t| {
-                t.month_id == month_id
-                    && matches!(
-                        t.status,
-                        TransactionStatus::Settled | TransactionStatus::Expected
-                    )
-                    && !t.is_matched_placeholder()
-            })
-            .fold(Money::ZERO, |acc, t| acc + t.amount);
-        Ok(MonthNet { month_id, net })
     }
 
     async fn save(

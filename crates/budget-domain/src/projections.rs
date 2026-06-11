@@ -58,10 +58,17 @@ pub struct CategorySpent {
 /// `BUDGET-STATUS-DRIVES-INCLUSION-1`).
 ///
 /// `net` is the signed `Money` total (income positive, expenses negative) of all
-/// transactions in the month whose status counts toward budget math. It is the
-/// month-level aggregate the rolling-Other computation (`SPEC §4.3`, build step
-/// 4) consumes; computing it in SQL avoids fetching every row to fold in Rust
-/// (`DB-NPLUSONE-1`).
+/// transactions in the month whose status counts toward budget math.
+///
+/// NOTE: the production rolling-Other / rollover computation is the single
+/// authoritative path
+/// [`budget_app_services::MonthLifecycleService::month_net_for`], which folds the
+/// full Rust predicate (`counts_in_month_expense_remaining`, including the
+/// `is_fund_draw` and income exclusions). The parallel `TransactionRepository::
+/// month_net` SQL aggregate that once returned this type was DELETED to remove a
+/// drift-prone second net formula (`DRIFT_REPORT` MUST-FIX #2 / SHOULD-FIX #5,
+/// `SPIRIT-ROBUSTNESS-1`). This struct survives only as a convenient net-oracle
+/// shape for test fakes; no production code returns it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MonthNet {
     /// The month this net belongs to.

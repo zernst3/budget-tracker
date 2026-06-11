@@ -77,6 +77,34 @@ struct MemTxnRepo {
     txns: Mutex<Vec<Transaction>>,
 }
 
+impl MemTxnRepo {
+    /// Independent net oracle (test-only inherent helper, not a trait method).
+    /// Settled + expected count, pending excluded, and a MATCHED expected
+    /// placeholder is excluded (it links to a real txn that counts instead) —
+    /// re-derived here, NOT via the production predicate, so the "counts exactly
+    /// once" assertion is non-tautological (`BUDGET-SETTLE-ON-MATCH-1` /
+    /// `BUDGET-NO-DOUBLE-CHARGE-1`). The production `TransactionRepository::
+    /// month_net` SQL aggregate was deleted (`DRIFT_REPORT` MUST-FIX #2 /
+    /// SHOULD-FIX #5); this oracle stands alone.
+    async fn month_net(&self, month_id: MonthId) -> Result<MonthNet, RepositoryError> {
+        let g = self.txns.lock().map_err(poisoned)?;
+        let net: Money = g
+            .iter()
+            .filter(|t| {
+                t.month_id == month_id
+                    && matches!(
+                        t.status,
+                        TransactionStatus::Settled | TransactionStatus::Expected
+                    )
+                    && !(t.status == TransactionStatus::Expected
+                        && t.matched_transaction_id.is_some())
+            })
+            .map(|t| t.amount)
+            .sum();
+        Ok(MonthNet { month_id, net })
+    }
+}
+
 #[async_trait]
 impl TransactionRepository for MemTxnRepo {
     async fn find_by_id(&self, id: TransactionId) -> Result<Option<Transaction>, RepositoryError> {
@@ -157,29 +185,6 @@ impl TransactionRepository for MemTxnRepo {
         _month_id: MonthId,
     ) -> Result<Vec<CategorySpent>, RepositoryError> {
         Ok(Vec::new())
-    }
-
-    /// Independent net oracle: settled + expected count, pending excluded, and a
-    /// MATCHED expected placeholder is excluded (it links to a real txn that
-    /// counts instead) — re-derived here, NOT via the production predicate, so the
-    /// "counts exactly once" assertion is non-tautological
-    /// (`BUDGET-SETTLE-ON-MATCH-1` / `BUDGET-NO-DOUBLE-CHARGE-1`).
-    async fn month_net(&self, month_id: MonthId) -> Result<MonthNet, RepositoryError> {
-        let g = self.txns.lock().map_err(poisoned)?;
-        let net: Money = g
-            .iter()
-            .filter(|t| {
-                t.month_id == month_id
-                    && matches!(
-                        t.status,
-                        TransactionStatus::Settled | TransactionStatus::Expected
-                    )
-                    && !(t.status == TransactionStatus::Expected
-                        && t.matched_transaction_id.is_some())
-            })
-            .map(|t| t.amount)
-            .sum();
-        Ok(MonthNet { month_id, net })
     }
 
     async fn save(
