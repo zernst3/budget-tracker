@@ -46,6 +46,7 @@ mod m0003_transaction_match_link;
 mod m0004_deficit_financing;
 mod m0005_transaction_comment;
 mod m0006_transfer_flag;
+mod m0007_portfolio_insights;
 
 /// The ordered migration list run by the server at startup.
 ///
@@ -63,6 +64,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0004_deficit_financing::Migration),
             Box::new(m0005_transaction_comment::Migration),
             Box::new(m0006_transfer_flag::Migration),
+            Box::new(m0007_portfolio_insights::Migration),
         ]
     }
 }
