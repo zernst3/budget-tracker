@@ -76,6 +76,9 @@ pub struct Model {
     pub prompt_tokens: Option<i64>,
     /// Completion token count, if the provider reported it.
     pub completion_tokens: Option<i64>,
+    /// The model's stop/finish reason (truncation / safety-stop audit). Nullable:
+    /// `None` on the short-circuit / parse-failure paths (`§0.4`).
+    pub finish_reason: Option<String>,
     /// Measured model-call latency in milliseconds.
     pub latency_ms: i64,
     /// When the review occurred (`ARCH-UTC-TIMESTAMPS-1`). The single audit

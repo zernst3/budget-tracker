@@ -151,8 +151,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_cash_balances_user_account
 -- ============================ review_runs =============================
 -- Append-only portfolio-review audit log (SQL-AUDIT-COLUMNS-1): no created_by /
 -- modified_by, no updated_at. JSONB payloads (snapshot / outcomes /
--- recommendations, §0.4 + addendum). prompt_tokens / completion_tokens nullable
--- (the provider may not report them).
+-- recommendations, §0.4 + addendum). prompt_tokens / completion_tokens /
+-- finish_reason nullable (the provider may not report them; finish_reason is the
+-- model's stop reason for truncation / safety-stop audit).
 CREATE TABLE IF NOT EXISTS review_runs (
     id                UUID                  PRIMARY KEY,
     user_id           UUID                  NOT NULL,
@@ -165,6 +166,7 @@ CREATE TABLE IF NOT EXISTS review_runs (
     terminal_state    review_terminal_state NOT NULL,
     prompt_tokens     BIGINT,
     completion_tokens BIGINT,
+    finish_reason     TEXT,
     latency_ms        BIGINT                NOT NULL,
     occurred_at       TIMESTAMPTZ           NOT NULL
 );
@@ -322,6 +324,11 @@ mod tests {
             PORTFOLIO_INSIGHTS_UP_DDL.contains("prompt_tokens     BIGINT,")
                 && PORTFOLIO_INSIGHTS_UP_DDL.contains("completion_tokens BIGINT,"),
             "review_runs token columns must be nullable BIGINT"
+        );
+        // finish_reason is a nullable TEXT audit column (model stop reason).
+        assert!(
+            PORTFOLIO_INSIGHTS_UP_DDL.contains("finish_reason     TEXT,"),
+            "review_runs.finish_reason must be a nullable TEXT column"
         );
         // latency_ms is NOT NULL.
         assert!(

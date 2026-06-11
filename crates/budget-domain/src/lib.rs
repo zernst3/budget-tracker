@@ -72,7 +72,7 @@ pub use plaid_api::{
 };
 pub use plaid_item::PlaidItem;
 pub use portfolio::{
-    AdvisorError, AdvisorOutput, CashBalance, CashBalanceSource, Claim, ClaimSubject,
+    AdvisorError, AdvisorOutput, CashBalance, CashBalanceSource, Claim, ClaimSubject, Confidence,
     InvestmentAdvisor, MarketDataError, MarketDataProvider, NetWorth, PortfolioSnapshot, Position,
     PositionSource, PriceProvenance, PriceQuote, PricedPosition, Recommendation, ReviewRun,
     ReviewTerminalState, Ticker, UnverifiedReason, ValidationOutcome,

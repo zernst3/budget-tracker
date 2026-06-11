@@ -252,14 +252,33 @@ pub struct PortfolioSnapshot {
 // Recommendation / Claim / ClaimSubject
 // ===========================================================================
 
-/// One model-produced recommendation: a title, a rationale, and the verifiable
-/// numeric claims it makes.
+/// The model's SELF-REPORTED confidence in a [`Recommendation`].
+///
+/// A DISPLAY signal only: it drives the "low-confidence flagged" guardrail in the
+/// UI. It is NOT reconciled against ground truth and is explicitly OUTSIDE
+/// `BUDGET-AI-1` (which governs only the tuple-reconciliation of [`Claim`]s). Rides
+/// inside `review_runs.recommendations` JSONB — no dedicated column.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Confidence {
+    /// The model reports high confidence.
+    High,
+    /// The model reports medium confidence.
+    Medium,
+    /// The model reports low confidence (drives the low-confidence display flag).
+    Low,
+}
+
+/// One model-produced recommendation: a title, a rationale, the model's
+/// self-reported confidence, and the verifiable numeric claims it makes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Recommendation {
     /// Short headline for the recommendation card.
     pub title: String,
     /// The supporting prose.
     pub rationale: String,
+    /// The model's SELF-REPORTED confidence — a DISPLAY signal only, NOT
+    /// reconciled, NOT part of `BUDGET-AI-1`.
+    pub confidence: Confidence,
     /// The verifiable numeric claims this recommendation makes.
     pub claims: Vec<Claim>,
 }
@@ -281,6 +300,14 @@ pub struct Claim {
 
 /// What a [`Claim`] is about. CLOSED enum — adding a variant forces a new
 /// `reconcile` arm (`BUDGET-AI-1`). NEVER defeat this with a `_ =>` wildcard.
+///
+/// Four variants. The `reconcile` arm for [`ClaimSubject::CostBasisGain`] is built
+/// with Phase 5 (it does not exist yet): ground truth = that position's
+/// `market_value - cost_basis`; ticker not found → `UnknownTicker`; `cost_basis`
+/// is `None` → `Unverified(MissingMarketData(ticker))` (the unrealized gain cannot
+/// be computed when cost basis is absent — same "a required figure is missing"
+/// semantics as a missing quote, so the reason is reused rather than adding a
+/// dedicated variant; revisit if a `MissingCostBasis` reason reads better in the UI).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClaimSubject {
     /// A claim about one holding's market value (and optionally its % share).
@@ -292,6 +319,11 @@ pub enum ClaimSubject {
     Buffer,
     /// A claim about total net worth.
     NetWorth,
+    /// A claim about one holding's unrealized gain (`market_value - cost_basis`).
+    CostBasisGain {
+        /// The holding the unrealized-gain claim is about.
+        ticker: Ticker,
+    },
 }
 
 // ===========================================================================
@@ -372,6 +404,11 @@ pub struct ReviewRun {
     pub prompt_tokens: Option<i64>,
     /// Completion token count, if the provider reported it.
     pub completion_tokens: Option<i64>,
+    /// The model's stop/finish reason, surfaced for audit (truncation /
+    /// safety-stop detection). `None` on the short-circuit / parse-failure paths
+    /// where the model produced no candidate. Written from
+    /// [`AdvisorOutput::finish_reason`].
+    pub finish_reason: Option<String>,
     /// Measured latency around the model call, in milliseconds.
     pub latency_ms: i64,
     /// When the review occurred, UTC-anchored (`ARCH-UTC-TIMESTAMPS-1`).
@@ -440,6 +477,12 @@ pub struct AdvisorOutput {
     pub prompt_tokens: Option<i64>,
     /// Completion token count, if the provider reported it.
     pub completion_tokens: Option<i64>,
+    /// The model's stop/finish reason (truncation / safety-stop detection),
+    /// mapped through from the Gemini wire's `finish_reason`. `None` on the mock
+    /// and the parse-failure paths (the `Parse` error path produces an
+    /// [`AdvisorError`], not an `AdvisorOutput`). Persisted to
+    /// `review_runs.finish_reason`.
+    pub finish_reason: Option<String>,
 }
 
 /// The market-data port — resolves a per-ticker quote.
@@ -600,5 +643,44 @@ mod tests {
         assert_eq!(normalized, Ok("AAPL".to_string()));
         let owned = Ticker::try_new("brk.a").map(Ticker::into_string);
         assert_eq!(owned, Ok("BRK.A".to_string()));
+    }
+
+    #[test]
+    fn confidence_serde_round_trips_each_variant() {
+        for variant in [Confidence::High, Confidence::Medium, Confidence::Low] {
+            let encoded = serde_json::to_string(&variant);
+            let decoded = encoded
+                .as_deref()
+                .map_err(|e| e.to_string())
+                .and_then(|s| serde_json::from_str::<Confidence>(s).map_err(|e| e.to_string()));
+            assert_eq!(decoded, Ok(variant));
+        }
+    }
+
+    #[test]
+    fn cost_basis_gain_subject_serde_round_trips() {
+        // The fourth ClaimSubject variant survives a JSON round-trip with its
+        // validated Ticker payload intact (`ORCH-NEW-PATH-TESTS-1`).
+        let subject = Ticker::try_new("aapl").map(|ticker| ClaimSubject::CostBasisGain { ticker });
+        let round_tripped = subject.as_ref().ok().and_then(|s| {
+            serde_json::to_string(s)
+                .ok()
+                .and_then(|json| serde_json::from_str::<ClaimSubject>(&json).ok())
+        });
+        assert_eq!(round_tripped, subject.ok());
+    }
+
+    #[test]
+    fn advisor_output_finish_reason_is_optional() {
+        // The added finish_reason field is `None` on the mock/short-circuit path.
+        let output = AdvisorOutput {
+            recommendations: Vec::new(),
+            raw_output: String::new(),
+            prompt_hash: String::new(),
+            prompt_tokens: None,
+            completion_tokens: None,
+            finish_reason: None,
+        };
+        assert_eq!(output.finish_reason, None);
     }
 }
