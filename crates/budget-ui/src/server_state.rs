@@ -509,48 +509,226 @@ impl TriageState {
 // PortfolioState — server state for the AI Portfolio Insights server functions
 // ---------------------------------------------------------------------------
 
+/// How [`PortfolioState`] builds an [`InvestmentAdvisor`] for a review run
+/// (`docs/AI_FEATURE_DESIGN.md §Phase 6`, Zach's locked decision #4).
+///
+/// Selected ONCE at wiring time by the `AI_MODE` env var, mirroring
+/// `PLAID_MODE`:
+/// - **`AI_MODE=mock`** → [`PortfolioAdvisorMode::Mock`]: the fixture-driven
+///   `MockInvestmentAdvisor` (zero network). The chosen `model_id` is still
+///   validated against the allow-list, but the mock ignores it.
+/// - **anything else / unset** → [`PortfolioAdvisorMode::Real`]: a real
+///   [`GeminiAdvisor`] built PER REQUEST with the validated `model_id` (locked
+///   decision #1), reading its API key from the vault. A misconfigured prod can
+///   NEVER silently reach the mock.
+#[derive(Clone)]
+pub enum PortfolioAdvisorMode {
+    /// Mock advisor (`AI_MODE=mock`): zero network, fixture-driven.
+    Mock,
+    /// Real Gemini advisor: a `GeminiAdvisor` is built per request with the
+    /// chosen model id, reading its API key from this vault.
+    Real {
+        /// The secret vault the per-request `GeminiAdvisor` reads its API key from
+        /// (`BUDGET-PLAID-TOKEN-VAULT-1`).
+        vault: Arc<dyn budget_domain::auth::SecretVault>,
+    },
+}
+
 /// Server state for the AI Portfolio Insights server functions
-/// (`docs/AI_FEATURE_DESIGN.md §Phase 2`).
+/// (`docs/AI_FEATURE_DESIGN.md §Phase 2`/`§Phase 6`).
 ///
 /// Holds the manual position/cash-balance persistence adapters the positions UI
-/// reads/writes through. The `market` provider (Phase 3) and the
-/// `GeneratePortfolioReview` use-case (Phase 5) fields are added in their
-/// respective phases — the struct is grown incrementally so each phase's
-/// green-gate holds without forward-referencing types that do not exist yet. The
-/// `from_connections` real/mock wiring lands in Phase 6 (`AI_MODE=mock`,
-/// mirroring `PLAID_MODE=mock`); until then the state is assembled directly by
-/// tests / the server edge.
+/// reads/writes through, the market-data provider, the review-run audit
+/// repository + unit of work, and the advisor selection mode. The review use-case
+/// is built PER REQUEST (`build_review_service`) because the chosen model id is a
+/// per-request input (locked decision #1) and a `GeminiAdvisor` is constructed for
+/// that exact model.
 ///
 /// `Arc`-backed so cloning into the Axum `Extension` is cheap.
 #[derive(Clone)]
 pub struct PortfolioState {
-    /// The manual positions read/write adapter (`PositionRepository`).
+    /// The manual positions read/write adapter (`PositionRepository`, also the
+    /// review use-case's `PositionSource` via trait upcast).
     pub position_source: Arc<dyn budget_domain::repositories::PositionRepository>,
-    /// The manual cash-balances read/write adapter (`CashBalanceRepository`),
-    /// bound to the single app user (`SPEC §9`; see `ManualCashBalanceSource`).
+    /// The manual cash-balances read/write adapter (`CashBalanceRepository`, also
+    /// the review use-case's `CashBalanceSource`), bound to the single app user.
     pub balance_source: Arc<dyn budget_domain::repositories::CashBalanceRepository>,
-    /// The market-data provider for per-ticker quote resolution (`§Phase 3`).
-    /// `MockMarketDataProvider` under (Phase 6) `AI_MODE=mock`; the real adapter
-    /// is an Open Item.
+    /// The market-data provider for per-ticker quote resolution. The Phase-6
+    /// fallback chain (Finnhub → Stooq → manual → None) on the real path; the
+    /// `MockMarketDataProvider` under `AI_MODE=mock`.
     pub market: Arc<dyn budget_domain::portfolio::MarketDataProvider>,
-    // The `GeneratePortfolioReview` use-case (`review_service`) is added in
-    // Phase 5; `run_review` stays a stub until Phase 6 wires its body.
+    /// The append-only review-run audit repository (`§Phase 5` persist step).
+    pub review_runs: Arc<dyn budget_domain::repositories::ReviewRunRepository>,
+    /// The unit-of-work provider the review persist runs inside
+    /// (`ARCH-EXPLICIT-TX-1`).
+    pub uow: Arc<dyn budget_domain::uow::UowProvider>,
+    /// How the review advisor is built (mock vs real Gemini) — `AI_MODE`.
+    pub advisor_mode: PortfolioAdvisorMode,
 }
 
 impl PortfolioState {
-    /// Assemble from collaborators (used directly by tests + the server edge
-    /// until the Phase-6 `from_connections` wiring lands).
+    /// Assemble from collaborators (used directly by tests injecting fakes).
     #[must_use]
     pub fn new(
         position_source: Arc<dyn budget_domain::repositories::PositionRepository>,
         balance_source: Arc<dyn budget_domain::repositories::CashBalanceRepository>,
         market: Arc<dyn budget_domain::portfolio::MarketDataProvider>,
+        review_runs: Arc<dyn budget_domain::repositories::ReviewRunRepository>,
+        uow: Arc<dyn budget_domain::uow::UowProvider>,
+        advisor_mode: PortfolioAdvisorMode,
     ) -> Self {
         Self {
             position_source,
             balance_source,
             market,
+            review_runs,
+            uow,
+            advisor_mode,
         }
+    }
+
+    /// Build the [`GeneratePortfolioReview`] use-case for the chosen `model_id`
+    /// (`§Phase 6`, locked decisions #1 + #4).
+    ///
+    /// On the real path a fresh [`GeminiAdvisor`] is constructed for that exact
+    /// model id (the caller has already validated it against the allow-list); on
+    /// the mock path the fixture-driven advisor is used (ignoring the model id).
+    /// The position/cash repositories are trait-upcast to the read `*Source`
+    /// ports the use-case depends on (Rust 1.86+ trait upcasting).
+    ///
+    /// # Errors
+    /// Returns a human error string if the real path's prerequisites are missing
+    /// (so the server fn 503s) — a misconfigured prod can never silently mock.
+    pub fn build_review_service(
+        &self,
+        model_id: &str,
+    ) -> Result<budget_app_services::GeneratePortfolioReview, String> {
+        use budget_domain::portfolio::InvestmentAdvisor;
+        use budget_infrastructure::{GeminiAdvisor, MockInvestmentAdvisor};
+
+        let advisor: Arc<dyn InvestmentAdvisor> = match &self.advisor_mode {
+            PortfolioAdvisorMode::Mock => Arc::new(MockInvestmentAdvisor::default_mock()),
+            PortfolioAdvisorMode::Real { vault } => {
+                Arc::new(GeminiAdvisor::new(Arc::clone(vault), model_id.to_owned()))
+            }
+        };
+
+        // Trait upcast: PositionRepository: PositionSource and
+        // CashBalanceRepository: CashBalanceSource, so the write repos serve as the
+        // use-case's read sources without a second handle.
+        let positions: Arc<dyn budget_domain::portfolio::PositionSource> =
+            Arc::clone(&self.position_source) as Arc<dyn budget_domain::portfolio::PositionSource>;
+        let balances: Arc<dyn budget_domain::portfolio::CashBalanceSource> =
+            Arc::clone(&self.balance_source)
+                as Arc<dyn budget_domain::portfolio::CashBalanceSource>;
+
+        Ok(budget_app_services::GeneratePortfolioReview::new(
+            positions,
+            balances,
+            Arc::clone(&self.market),
+            advisor,
+            Arc::clone(&self.review_runs),
+            Arc::clone(&self.uow),
+        ))
+    }
+
+    /// Wire the production `PortfolioState` from independent live `SeaORM`
+    /// connections, selecting the advisor + market provider + vault by `AI_MODE`
+    /// (`§Phase 6`, locked decision #4 — mirrors `PLAID_MODE=mock`).
+    ///
+    /// - **`AI_MODE=mock`** (explicit opt-in): `MockInvestmentAdvisor` +
+    ///   `MockMarketDataProvider` + `InMemorySecretVault`, with a loud `WARN`.
+    ///   Zero network. Requires no key.
+    /// - **anything else / unset** (default/production): the real market-data
+    ///   chain (Finnhub → Stooq → manual) + a real `GeminiAdvisor` (built per
+    ///   request) reading its key from `AzureKeyVault`. This real path requires
+    ///   `KEY_VAULT_URL` AND a non-empty `GEMINI_MODEL_IDS` resolution; if either
+    ///   is missing it returns `Err` (the server edge surfaces a 503) so a
+    ///   misconfigured prod can NEVER silently reach the mock.
+    ///
+    /// # Errors
+    /// Returns an error string if the real path is selected but `KEY_VAULT_URL` is
+    /// missing/invalid or `GEMINI_MODEL_IDS` resolves to an empty list.
+    pub fn from_connections(
+        positions_db: DatabaseConnection,
+        balances_db: DatabaseConnection,
+        review_runs_db: DatabaseConnection,
+        review_uow_db: DatabaseConnection,
+        balances_user_id: budget_domain::ids::UserId,
+    ) -> Result<Self, String> {
+        use budget_domain::auth::SecretVault;
+        use budget_domain::portfolio::MarketDataProvider;
+        use budget_domain::repositories::{
+            CashBalanceRepository, PositionRepository, ReviewRunRepository,
+        };
+        use budget_domain::uow::UowProvider;
+        use budget_infrastructure::{
+            AzureKeyVault, ChainMarketDataProvider, FinnhubMarketData, InMemorySecretVault,
+            ManualCashBalanceSource, ManualPositionSource, ManualPriceSource,
+            MockMarketDataProvider, PostgresReviewRunRepository, SeaOrmUowProvider,
+            StooqMarketData,
+        };
+
+        let position_source: Arc<dyn PositionRepository> =
+            Arc::new(ManualPositionSource::new(positions_db));
+        let balance_source: Arc<dyn CashBalanceRepository> =
+            Arc::new(ManualCashBalanceSource::new(balances_db, balances_user_id));
+        let review_runs: Arc<dyn ReviewRunRepository> =
+            Arc::new(PostgresReviewRunRepository::new(review_runs_db));
+        let uow: Arc<dyn UowProvider> = Arc::new(SeaOrmUowProvider::new(review_uow_db));
+
+        // Select market provider + advisor mode by AI_MODE (the mock is reached
+        // ONLY by the exact `AI_MODE=mock` opt-in).
+        let mock_mode = std::env::var("AI_MODE").as_deref() == Ok("mock");
+        let (market, advisor_mode): (Arc<dyn MarketDataProvider>, PortfolioAdvisorMode) =
+            if mock_mode {
+                tracing::warn!(
+                    "AI_MODE=mock — using the LOCAL MockInvestmentAdvisor + \
+                     MockMarketDataProvider + in-memory secret store (NO real Gemini / \
+                     market feed / Key Vault). This is a local-testing path; it must \
+                     NEVER be set in production."
+                );
+                let _mock_vault: Arc<dyn SecretVault> = Arc::new(InMemorySecretVault::new());
+                (
+                    Arc::new(MockMarketDataProvider::new()),
+                    PortfolioAdvisorMode::Mock,
+                )
+            } else {
+                // Real path. Require KEY_VAULT_URL (the Gemini + Finnhub keys live
+                // there) AND a non-empty model allow-list, else Err -> 503.
+                let vault_url = std::env::var("KEY_VAULT_URL").map_err(|_| {
+                    "AI real path: KEY_VAULT_URL is required (the Gemini/Finnhub API \
+                     keys are vault secrets); refusing to fall back to the mock"
+                        .to_owned()
+                })?;
+                if crate::services::portfolio_review::allowed_model_ids().is_empty() {
+                    return Err("AI real path: GEMINI_MODEL_IDS resolved to an empty \
+                                allow-list"
+                        .to_owned());
+                }
+                let vault: Arc<dyn SecretVault> =
+                    Arc::new(AzureKeyVault::new(&vault_url).map_err(|e| e.to_string())?);
+
+                // The market-data fallback chain: Finnhub (key from vault) -> Stooq
+                // (keyless) -> manual -> None. Runs with NO key (Stooq + manual);
+                // the Finnhub key only upgrades to real-time quotes.
+                let finnhub: Arc<dyn MarketDataProvider> =
+                    Arc::new(FinnhubMarketData::new(Arc::clone(&vault)));
+                let stooq: Arc<dyn MarketDataProvider> = Arc::new(StooqMarketData::new());
+                let manual: Arc<dyn MarketDataProvider> = Arc::new(ManualPriceSource::new());
+                let chain: Arc<dyn MarketDataProvider> =
+                    Arc::new(ChainMarketDataProvider::new(vec![finnhub, stooq, manual]));
+                (chain, PortfolioAdvisorMode::Real { vault })
+            };
+
+        Ok(Self::new(
+            position_source,
+            balance_source,
+            market,
+            review_runs,
+            uow,
+            advisor_mode,
+        ))
     }
 
     /// Extract the `PortfolioState` from the current server-function request.

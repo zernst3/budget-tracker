@@ -10,11 +10,13 @@
 //!
 //! ## Phase status (`docs/AI_FEATURE_DESIGN.md`)
 //!
-//! - **Phase 2 (this phase):** the six position/balance CRUD functions are live.
+//! - **Phase 2:** the six position/balance CRUD functions are live.
 //! - **Phase 3:** [`portfolio_snapshot`] goes live (market-data fan-out).
-//! - **Phase 6:** [`run_review`] gets its body (the real review pipeline).
-//!   Until then it is a `501` stub so a caller gets a clear "not implemented yet"
-//!   rather than a panic.
+//! - **Phase 6 (this phase):** [`run_review`] gets its body (the real review
+//!   pipeline: validate the chosen model against the allow-list, build the
+//!   use-case for mock or real `GeminiAdvisor`, persist the audit run, map to
+//!   [`ReviewResultDto`] via [`review_run_to_dto`]); [`list_models`] exposes the
+//!   model-id allow-list for the dropdown (locked decision #1).
 //!
 //! ## Money representation (`BUDGET-MONEY-1`)
 //!
@@ -470,6 +472,260 @@ pub fn snapshot_to_dto(snap: &budget_domain::portfolio::PortfolioSnapshot) -> Po
 }
 
 // ---------------------------------------------------------------------------
+// review_run domain -> DTO (Phase 6) — RUST-DIOXUS-10 boundary
+// ---------------------------------------------------------------------------
+//
+// The single boundary where the audit `ReviewRun` becomes the client-facing
+// `ReviewResultDto`. Raw `ClaimSubject` discriminants and raw `UnverifiedReason`
+// codes NEVER cross to the client — they are rendered to HUMAN strings HERE
+// (`RUST-DIOXUS-10`, `ARCH-API-DTOS-1`). Lives in `budget-ui` (not
+// `budget-mappers`) because the DTO is WASM-clean and `budget-mappers` depends on
+// `sea-orm`; this mirrors the documented Phase-2 judgment call for the position /
+// cash DTO mappers above.
+
+/// Render a [`ClaimSubject`](budget_domain::portfolio::ClaimSubject) to its human
+/// display string (`subject_to_display`, `RUST-DIOXUS-10`). The raw discriminant
+/// never crosses to the client.
+#[cfg(feature = "server")]
+#[must_use]
+fn subject_to_display(subject: &budget_domain::portfolio::ClaimSubject) -> String {
+    use budget_domain::portfolio::ClaimSubject;
+    match subject {
+        ClaimSubject::Position { ticker } => format!("{ticker} market value"),
+        ClaimSubject::Buffer => "Reserved cash buffer".to_owned(),
+        ClaimSubject::NetWorth => "Total net worth".to_owned(),
+        ClaimSubject::CostBasisGain { ticker } => format!("{ticker} unrealized gain"),
+    }
+}
+
+/// Render a [`Confidence`](budget_domain::portfolio::Confidence) to its display
+/// string (`confidence_to_display`). Display-only — never reconciled.
+#[cfg(feature = "server")]
+#[must_use]
+fn confidence_to_display(confidence: &budget_domain::portfolio::Confidence) -> String {
+    use budget_domain::portfolio::Confidence;
+    match confidence {
+        Confidence::High => "high".to_owned(),
+        Confidence::Medium => "medium".to_owned(),
+        Confidence::Low => "low".to_owned(),
+    }
+}
+
+/// Render an [`UnverifiedReason`](budget_domain::portfolio::UnverifiedReason) to a
+/// HUMAN string (`unverified_reason_to_string`, `RUST-DIOXUS-10`). Raw codes never
+/// reach the client. Money/ratio figures render through their decimal string.
+#[cfg(feature = "server")]
+#[must_use]
+fn unverified_reason_to_string(reason: &budget_domain::portfolio::UnverifiedReason) -> String {
+    use budget_domain::portfolio::UnverifiedReason;
+    match reason {
+        UnverifiedReason::UnknownTicker(t) => {
+            format!("cites {t}, which is not in your portfolio")
+        }
+        UnverifiedReason::ValueMismatch {
+            cited,
+            ground_truth,
+        } => format!(
+            "cited {} but your data shows {}",
+            cited.as_decimal(),
+            ground_truth.as_decimal()
+        ),
+        UnverifiedReason::MissingMarketData(t) => {
+            format!("no current price for {t}, so this figure could not be checked")
+        }
+        UnverifiedReason::PercentageMismatch {
+            cited,
+            ground_truth,
+        } => format!(
+            "cited {}% of portfolio but your data shows {}%",
+            cited * rust_decimal::Decimal::from(100),
+            ground_truth * rust_decimal::Decimal::from(100)
+        ),
+        UnverifiedReason::MalformedClaim(detail) => {
+            format!("the claim was malformed: {detail}")
+        }
+    }
+}
+
+/// Render a [`ValidationOutcome`](budget_domain::portfolio::ValidationOutcome) to
+/// a [`ValidationBadgeDto`] (`outcome_to_badge`). The unverified reason is
+/// human-rendered at this boundary.
+#[cfg(feature = "server")]
+#[must_use]
+fn outcome_to_badge(outcome: &budget_domain::portfolio::ValidationOutcome) -> ValidationBadgeDto {
+    use budget_domain::portfolio::ValidationOutcome;
+    match outcome {
+        ValidationOutcome::Verified => ValidationBadgeDto::Verified,
+        ValidationOutcome::Unverified(reason) => ValidationBadgeDto::Unverified {
+            reason: unverified_reason_to_string(reason),
+        },
+    }
+}
+
+/// Map the domain [`ReviewTerminalState`](budget_domain::portfolio::ReviewTerminalState)
+/// to its DTO (`terminal_state_to_dto`).
+#[cfg(feature = "server")]
+#[must_use]
+fn terminal_state_to_dto(
+    state: &budget_domain::portfolio::ReviewTerminalState,
+) -> ReviewTerminalStateDto {
+    use budget_domain::portfolio::ReviewTerminalState;
+    match state {
+        ReviewTerminalState::Completed => ReviewTerminalStateDto::Completed,
+        ReviewTerminalState::NoVerifiableInsights => ReviewTerminalStateDto::NoVerifiableInsights,
+        ReviewTerminalState::EmptyPortfolio => ReviewTerminalStateDto::EmptyPortfolio,
+        ReviewTerminalState::MalformedOutput => ReviewTerminalStateDto::MalformedOutput,
+    }
+}
+
+/// Compute the deterministic tax note (N2) for a recommendation, from the
+/// account_type of the positions its claims cite — NEVER from model output.
+///
+/// Interpretation of N2 (judgment call, documented): with the available
+/// [`AccountType`](budget_domain::enums::AccountType) enum (no Roth/IRA variant),
+/// the tax-relevant case is a claim about a holding in an `Investment` account:
+/// trimming/selling there has capital-gains implications. A recommendation citing
+/// at least one `Position` / `CostBasisGain` claim whose underlying position is in
+/// an `Investment` account gets the note; everything else gets `None`. Looked up
+/// against the persisted snapshot's positions (the same ground truth reconcile
+/// used), so it is fully deterministic and never trusts the model.
+#[cfg(feature = "server")]
+#[must_use]
+fn compute_tax_note(
+    rec: &budget_domain::portfolio::Recommendation,
+    snapshot: &budget_domain::portfolio::PortfolioSnapshot,
+) -> Option<String> {
+    use budget_domain::enums::AccountType;
+    use budget_domain::portfolio::ClaimSubject;
+
+    let cites_investment_holding = rec.claims.iter().any(|claim| {
+        let ticker = match &claim.subject {
+            ClaimSubject::Position { ticker } | ClaimSubject::CostBasisGain { ticker } => ticker,
+            ClaimSubject::Buffer | ClaimSubject::NetWorth => return false,
+        };
+        snapshot.positions.iter().any(|pp| {
+            pp.position.ticker == *ticker
+                && matches!(pp.position.account_type, AccountType::Investment)
+        })
+    });
+    cites_investment_holding.then(|| {
+        "This recommendation touches a holding in a taxable investment account; \
+         selling or trimming may realize a capital gain or loss. Consider the tax \
+         impact and consult a professional."
+            .to_owned()
+    })
+}
+
+/// Render one recommendation + its outcome to a [`RecommendationDto`].
+///
+/// `outcome` is the recommendation's aggregate (worst-across-claims) outcome,
+/// driving the card badge. Each claim is re-reconciled against the snapshot for
+/// its own per-claim badge (the use-case persisted only the aggregate outcome per
+/// rec; the per-claim breakdown is recomputed deterministically here against the
+/// same persisted snapshot — never trusting the model).
+#[cfg(feature = "server")]
+#[must_use]
+fn recommendation_to_dto(
+    rec: &budget_domain::portfolio::Recommendation,
+    aggregate_outcome: &budget_domain::portfolio::ValidationOutcome,
+    snapshot: &budget_domain::portfolio::PortfolioSnapshot,
+) -> RecommendationDto {
+    let per_claim = budget_app_services::reconcile(rec, snapshot).per_claim;
+    let claims = rec
+        .claims
+        .iter()
+        .zip(per_claim.iter())
+        .map(|(claim, (_subject, outcome))| ClaimDto {
+            subject: subject_to_display(&claim.subject),
+            cited_value: claim.cited_value.as_decimal().to_string(),
+            cited_percentage: claim.cited_percentage.map(|p| p.to_string()),
+            badge: outcome_to_badge(outcome),
+        })
+        .collect();
+
+    RecommendationDto {
+        title: rec.title.clone(),
+        rationale: rec.rationale.clone(),
+        confidence: confidence_to_display(&rec.confidence),
+        badge: outcome_to_badge(aggregate_outcome),
+        claims,
+        tax_note: compute_tax_note(rec, snapshot),
+    }
+}
+
+/// Map a persisted [`ReviewRun`](budget_domain::portfolio::ReviewRun) to the
+/// client-facing [`ReviewResultDto`] (`review_run_to_dto`, `RUST-DIOXUS-10`).
+///
+/// Zips `recommendations[i]` with `outcomes` by the LOCKED index-paired shape
+/// (`§0.4`); renders subjects/reasons/confidence to human strings at this
+/// boundary; computes `tax_note` deterministically (N2) from the snapshot, never
+/// from model output; always carries the standing [`PORTFOLIO_REVIEW_DISCLAIMER`].
+/// `finish_reason` is audit-only and is NOT surfaced.
+#[cfg(feature = "server")]
+#[must_use]
+pub fn review_run_to_dto(run: &budget_domain::portfolio::ReviewRun) -> ReviewResultDto {
+    use budget_domain::portfolio::ValidationOutcome;
+
+    // Index the outcomes by their paired index for an O(1) per-rec lookup.
+    let recommendations = run
+        .recommendations
+        .iter()
+        .enumerate()
+        .map(|(i, rec)| {
+            let aggregate = run
+                .outcomes
+                .iter()
+                .find(|(idx, _)| *idx == i)
+                .map_or(&ValidationOutcome::Verified, |(_, o)| o);
+            recommendation_to_dto(rec, aggregate, &run.snapshot)
+        })
+        .collect();
+
+    ReviewResultDto {
+        run_id: run.id.value(),
+        terminal_state: terminal_state_to_dto(&run.terminal_state),
+        recommendations,
+        disclaimer: PORTFOLIO_REVIEW_DISCLAIMER,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AI model-id allow-list config (Zach's locked decision #1)
+// ---------------------------------------------------------------------------
+
+/// The seeded default model-id allow-list when `GEMINI_MODEL_IDS` is unset
+/// (Zach's locked decision #1). This is the ONLY place a model id appears as a
+/// literal, and only as the seeded-default config string (`ORCH-TRAINING-CUTOFF-1`).
+#[cfg(feature = "server")]
+const DEFAULT_GEMINI_MODEL_IDS: &str = "gemini-2.5-pro,gemini-2.5-flash";
+
+/// Parse a comma-separated model-id list: trims blanks, drops empties, dedups
+/// while keeping first occurrence + order. Pure (no env) so it is unit-tested
+/// directly (the env mutation needed to test [`allowed_model_ids`] is forbidden
+/// here — `unsafe-code` is denied in this crate).
+#[cfg(feature = "server")]
+#[must_use]
+fn parse_model_ids(raw: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter(|s| seen.insert(s.to_string()))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// Resolve the allowed model-id list from `GEMINI_MODEL_IDS` (comma-separated),
+/// falling back to the seeded default. Delegates parsing to [`parse_model_ids`].
+#[cfg(feature = "server")]
+#[must_use]
+pub fn allowed_model_ids() -> Vec<String> {
+    let raw =
+        std::env::var("GEMINI_MODEL_IDS").unwrap_or_else(|_| DEFAULT_GEMINI_MODEL_IDS.to_owned());
+    parse_model_ids(&raw)
+}
+
+// ---------------------------------------------------------------------------
 // Server-fn error helper
 // ---------------------------------------------------------------------------
 
@@ -680,21 +936,84 @@ pub async fn portfolio_snapshot() -> Result<PortfolioSnapshotDto, ServerFnError>
     Ok(snapshot_to_dto(&snapshot))
 }
 
-/// Run the AI portfolio review for the authenticated user (Phase 6).
+/// The allowed Gemini model ids for the review dropdown (Zach's locked
+/// decision #1). The view renders these as a `<select>`; `run_review` validates
+/// the chosen id against this same list.
 ///
 /// # Errors
-/// `ServerFnError` (401) without a valid session; 501 until Phase 6 wires the
-/// review pipeline.
+/// `ServerFnError` (401) without a valid session; 503 if the real path is
+/// selected but `GEMINI_MODEL_IDS` resolution yields nothing (a misconfigured
+/// prod — never silently empty).
 #[allow(clippy::unused_async)]
 #[server]
-pub async fn run_review() -> Result<ReviewResultDto, ServerFnError> {
-    // Phase 6 wires the body (require_authed_user -> PortfolioState::extract ->
-    // GeneratePortfolioReview -> review_run_to_dto). Until then it is a clear 501.
-    Err(ServerFnError::ServerError {
-        message: "run_review is not implemented until Phase 6".to_owned(),
-        code: 501,
-        details: None,
-    })
+pub async fn list_models() -> Result<Vec<String>, ServerFnError> {
+    use crate::services::gate::require_authed_user;
+
+    let _user = require_authed_user().await?;
+    let models = allowed_model_ids();
+    if models.is_empty() {
+        return Err(ServerFnError::ServerError {
+            message: "no Gemini model ids configured (GEMINI_MODEL_IDS)".to_owned(),
+            code: 503,
+            details: None,
+        });
+    }
+    Ok(models)
+}
+
+/// Run the AI portfolio review for the authenticated user (`§Phase 6`).
+///
+/// Gate FIRST (`BUDGET-AUTH-GATE-1`) → extract state → validate the chosen
+/// `model_id` against the allow-list (`ORCH-TRAINING-CUTOFF-1`) → build the
+/// review use-case for that model (mock or real `GeminiAdvisor`) →
+/// `generate_portfolio_review` → `review_run_to_dto`. Returns `Ok` even for
+/// `MalformedOutput` / `EmptyPortfolio` (the terminal state communicates the
+/// outcome); only a retryable transport failure surfaces as an error.
+///
+/// # Errors
+/// `ServerFnError` (401) without a valid session; 422-shaped 400 if `model_id`
+/// is not in the allow-list; 503 if the real path is selected but its
+/// prerequisites (`KEY_VAULT_URL` / `GEMINI_MODEL_IDS`) are missing; 500 on a
+/// transport / persistence failure.
+#[allow(clippy::unused_async)]
+#[server]
+pub async fn run_review(model_id: String) -> Result<ReviewResultDto, ServerFnError> {
+    use crate::server_state::PortfolioState;
+    use crate::services::gate::require_authed_user;
+
+    let user = require_authed_user().await?;
+    let state = PortfolioState::extract().await?;
+
+    // Validate the chosen model id against the allow-list (locked decision #1).
+    // A model id NOT in the list is a typed 400 (a tampered/stale client choice),
+    // never silently honored.
+    let allowed = allowed_model_ids();
+    if !allowed.iter().any(|m| m == &model_id) {
+        return Err(ServerFnError::ServerError {
+            message: format!("model id '{model_id}' is not an allowed model"),
+            code: 400,
+            details: None,
+        });
+    }
+
+    // Build the review use-case for the chosen model (mock or real GeminiAdvisor).
+    // The real path 503s here if its prerequisites are missing — a misconfigured
+    // prod can NEVER silently reach the mock (mirrors PLAID_MODE=mock).
+    let service =
+        state
+            .build_review_service(&model_id)
+            .map_err(|e| ServerFnError::ServerError {
+                message: e,
+                code: 503,
+                details: None,
+            })?;
+
+    let run = service
+        .generate_portfolio_review(user.id(), chrono::Utc::now())
+        .await
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    Ok(review_run_to_dto(&run))
 }
 
 // ---------------------------------------------------------------------------
@@ -954,5 +1273,175 @@ mod tests {
         let snap = snapshot(vec![priced("AAPL", 10, Some(0), true)], 0);
         let dto = snapshot_to_dto(&snap);
         assert_eq!(dto.positions[0].pct_of_portfolio, None);
+    }
+
+    // -- Phase 6: review_run_to_dto + AI config (ORCH-NEW-PATH-TESTS-1) -------
+
+    use budget_domain::ids::ReviewRunId;
+    use budget_domain::portfolio::{
+        Claim, ClaimSubject, Confidence, Recommendation, ReviewRun, ReviewTerminalState,
+        UnverifiedReason, ValidationOutcome,
+    };
+
+    /// A canonical snapshot: AAPL $1800 in an INVESTMENT account (tax-relevant)
+    /// + a $5000 reserved buffer. Drives the tax_note + reconcile assertions.
+    fn review_snapshot() -> PortfolioSnapshot {
+        let mut snap = snapshot(vec![priced("AAPL", 10, Some(180_000), true)], 180_000);
+        snap.buffer_total = Money::from_minor(500_000);
+        snap.net_worth.total = Money::from_minor(680_000);
+        snap
+    }
+
+    fn rec(subject: ClaimSubject, cited_cents: i64) -> Recommendation {
+        Recommendation {
+            title: "Do a thing".to_owned(),
+            rationale: "Because reasons".to_owned(),
+            confidence: Confidence::Medium,
+            claims: vec![Claim {
+                subject,
+                cited_value: Money::from_minor(cited_cents),
+                cited_percentage: None,
+            }],
+        }
+    }
+
+    fn run_with(
+        recommendations: Vec<Recommendation>,
+        outcomes: Vec<(usize, ValidationOutcome)>,
+        terminal_state: ReviewTerminalState,
+        raw_output: &str,
+    ) -> ReviewRun {
+        ReviewRun {
+            id: ReviewRunId::generate(),
+            user_id: UserId::generate(),
+            model_id: "gemini-2.5-pro".to_owned(),
+            prompt_hash: "hash".to_owned(),
+            raw_output: raw_output.to_owned(),
+            snapshot: review_snapshot(),
+            recommendations,
+            outcomes,
+            terminal_state,
+            prompt_tokens: Some(1),
+            completion_tokens: Some(2),
+            finish_reason: Some("STOP".to_owned()),
+            latency_ms: 5,
+            occurred_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn review_run_to_dto_renders_a_verified_completed_run_with_tax_note() {
+        // AAPL position claim matching ground truth -> Verified; the holding is in
+        // an Investment account -> tax_note present.
+        let run = run_with(
+            vec![rec(
+                ClaimSubject::Position {
+                    ticker: Ticker::try_new("AAPL").unwrap(),
+                },
+                180_000,
+            )],
+            vec![(0, ValidationOutcome::Verified)],
+            ReviewTerminalState::Completed,
+            "{\"recommendations\":[]}",
+        );
+        let dto = review_run_to_dto(&run);
+        assert_eq!(dto.terminal_state, ReviewTerminalStateDto::Completed);
+        assert_eq!(dto.recommendations.len(), 1);
+        let card = &dto.recommendations[0];
+        assert_eq!(card.confidence, "medium");
+        assert_eq!(card.badge, ValidationBadgeDto::Verified);
+        assert_eq!(card.claims[0].subject, "AAPL market value");
+        assert_eq!(card.claims[0].badge, ValidationBadgeDto::Verified);
+        assert!(
+            card.tax_note.is_some(),
+            "an Investment-account claim gets a tax note"
+        );
+        // The standing disclaimer is always present.
+        assert_eq!(dto.disclaimer, PORTFOLIO_REVIEW_DISCLAIMER);
+    }
+
+    #[test]
+    fn review_run_to_dto_renders_an_unverified_claim_with_a_human_reason() {
+        // A wrong AAPL figure -> ValueMismatch; the badge carries a HUMAN string,
+        // never the raw code (RUST-DIOXUS-10).
+        let run = run_with(
+            vec![rec(
+                ClaimSubject::Position {
+                    ticker: Ticker::try_new("AAPL").unwrap(),
+                },
+                5_000_000, // $50,000 hallucination vs $1800 truth
+            )],
+            vec![(
+                0,
+                ValidationOutcome::Unverified(UnverifiedReason::ValueMismatch {
+                    cited: Money::from_minor(5_000_000),
+                    ground_truth: Money::from_minor(180_000),
+                }),
+            )],
+            ReviewTerminalState::NoVerifiableInsights,
+            "{}",
+        );
+        let dto = review_run_to_dto(&run);
+        let card = &dto.recommendations[0];
+        match &card.badge {
+            ValidationBadgeDto::Unverified { reason } => {
+                assert!(reason.contains("50000") || reason.contains("1800"));
+            }
+            ValidationBadgeDto::Verified => panic!("expected an unverified badge"),
+        }
+    }
+
+    #[test]
+    fn review_run_to_dto_renders_a_malformed_run_with_no_recommendations() {
+        let run = run_with(
+            vec![],
+            vec![],
+            ReviewTerminalState::MalformedOutput,
+            "not json at all",
+        );
+        let dto = review_run_to_dto(&run);
+        assert_eq!(dto.terminal_state, ReviewTerminalStateDto::MalformedOutput);
+        assert!(dto.recommendations.is_empty());
+        assert_eq!(dto.disclaimer, PORTFOLIO_REVIEW_DISCLAIMER);
+    }
+
+    #[test]
+    fn tax_note_absent_for_a_buffer_only_recommendation() {
+        // A Buffer claim touches no investment holding -> no tax note.
+        let run = run_with(
+            vec![rec(ClaimSubject::Buffer, 500_000)],
+            vec![(0, ValidationOutcome::Verified)],
+            ReviewTerminalState::Completed,
+            "{}",
+        );
+        let dto = review_run_to_dto(&run);
+        assert_eq!(dto.recommendations[0].tax_note, None);
+    }
+
+    #[test]
+    fn subject_to_display_renders_cost_basis_gain() {
+        let s = subject_to_display(&ClaimSubject::CostBasisGain {
+            ticker: Ticker::try_new("AAPL").unwrap(),
+        });
+        assert_eq!(s, "AAPL unrealized gain");
+    }
+
+    #[test]
+    fn parse_model_ids_seeded_default() {
+        // The seeded-default string parses to the two locked default models
+        // (decision #1). Tests the pure parser (env mutation is forbidden here —
+        // `unsafe-code` is denied — so allowed_model_ids()'s env read is exercised
+        // only at runtime).
+        assert_eq!(
+            parse_model_ids(DEFAULT_GEMINI_MODEL_IDS),
+            vec!["gemini-2.5-pro", "gemini-2.5-flash"]
+        );
+    }
+
+    #[test]
+    fn parse_model_ids_trims_dedups_and_preserves_order() {
+        assert_eq!(parse_model_ids(" a , b ,a, ,c "), vec!["a", "b", "c"]);
+        assert!(parse_model_ids("   ").is_empty());
+        assert!(parse_model_ids("").is_empty());
     }
 }

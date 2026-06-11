@@ -36,7 +36,7 @@ use sea_orm::{ConnectOptions, Database};
 
 use budget_infrastructure::auth::{SessionLayerConfig, build_session_layer};
 use budget_infrastructure::run_pending_migrations;
-use budget_ui::server_state::{AppState, MonthViewState, TriageState};
+use budget_ui::server_state::{AppState, MonthViewState, PortfolioState, TriageState};
 
 // The entrypoint is a linear wiring sequence (connections -> migrations -> state
 // -> router -> serve); splitting it would scatter the one-shot startup wiring
@@ -130,6 +130,22 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("connecting to the database (triage plaid sync uow)")?;
 
+    // Connections for the AI Portfolio Insights server functions (positions,
+    // cash balances, the review-run audit log, and the review unit of work). Each
+    // gets its own pool handle (same SeaORM `mock`-feature `Clone` reason).
+    let portfolio_positions_db = connect()
+        .await
+        .context("connecting to the database (portfolio positions)")?;
+    let portfolio_balances_db = connect()
+        .await
+        .context("connecting to the database (portfolio balances)")?;
+    let portfolio_review_runs_db = connect()
+        .await
+        .context("connecting to the database (portfolio review runs)")?;
+    let portfolio_review_uow_db = connect()
+        .await
+        .context("connecting to the database (portfolio review uow)")?;
+
     // Apply pending schema migrations before serving any traffic (idempotent).
     run_pending_migrations(&db)
         .await
@@ -181,6 +197,56 @@ async fn main() -> anyhow::Result<()> {
         triage_plaid_sync_uow_db,
     )
     .map_err(|e| anyhow::anyhow!("building the triage/plaid state: {e}"))?;
+
+    // AI Portfolio Insights state (positions / cash / review). The cash-balance
+    // adapter is bound to the single app user (SPEC §9); the user is provisioned
+    // out-of-band, so resolve its id at startup from the `BUDGET_USER_EMAIL`
+    // config. If that is unset or the user does not exist yet, the portfolio
+    // Extension is NOT mounted (the portfolio routes then return the standard
+    // "state unavailable" 500, mirroring the Plaid-optional posture) — no other
+    // route is affected. The advisor / market / vault selection inside
+    // `from_connections` is driven by `AI_MODE` (mock vs real Gemini), mirroring
+    // `PLAID_MODE`.
+    let portfolio_state = match std::env::var("BUDGET_USER_EMAIL") {
+        Ok(email) if !email.trim().is_empty() => {
+            match state.users.find_by_email(email.trim()).await {
+                Ok(Some(user)) => match PortfolioState::from_connections(
+                    portfolio_positions_db,
+                    portfolio_balances_db,
+                    portfolio_review_runs_db,
+                    portfolio_review_uow_db,
+                    user.id,
+                ) {
+                    Ok(ps) => Some(ps),
+                    Err(e) => {
+                        tracing::warn!(
+                            "AI Portfolio Insights not wired (AI real-path \
+                             prerequisites missing): {e}"
+                        );
+                        None
+                    }
+                },
+                Ok(None) => {
+                    tracing::warn!(
+                        "AI Portfolio Insights not wired: BUDGET_USER_EMAIL set but no \
+                         matching user (provision the user first)"
+                    );
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!("AI Portfolio Insights not wired (user lookup failed): {e}");
+                    None
+                }
+            }
+        }
+        _ => {
+            tracing::info!(
+                "AI Portfolio Insights not wired: set BUDGET_USER_EMAIL to the \
+                 provisioned single-user email to enable the portfolio routes"
+            );
+            None
+        }
+    };
 
     // The bind address the `dx` CLI / Container Apps injects; localhost for a
     // bare `cargo run`.
@@ -236,6 +302,12 @@ async fn main() -> anyhow::Result<()> {
         .layer(Extension(month_view_state))
         .layer(Extension(state))
         .layer(session_layer);
+
+    // Mount the AI Portfolio Insights state only when it resolved (see above).
+    let router = match portfolio_state {
+        Some(ps) => router.layer(Extension(ps)),
+        None => router,
+    };
 
     let listener = tokio::net::TcpListener::bind(address)
         .await
