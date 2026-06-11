@@ -17,5 +17,8 @@ rust_decimal = { workspace = true }
 # Persistence Models — SeaORM macros only. The runtime / driver features
 # live in budget-infrastructure; the workspace's feature unification merges
 # them without duplicating compile units. `with-rust_decimal` integrates the
-# Money backing type with Postgres NUMERIC columns.
-sea-orm = { workspace = true, features = ["macros", "with-rust_decimal", "with-chrono", "with-uuid"] }
+# Money backing type with Postgres NUMERIC columns. `with-json` backs the JSONB
+# columns on `review_runs` (snapshot / outcomes / recommendations) — `Json` on
+# the Model — declared explicitly so the entities crate is self-contained rather
+# than relying on feature unification from a downstream crate.
+sea-orm = { workspace = true, features = ["macros", "with-rust_decimal", "with-chrono", "with-uuid", "with-json"] }
