@@ -109,7 +109,7 @@ mod tests {
         let ts = Utc
             .with_ymd_and_hms(2026, 6, 10, 12, 0, 0)
             .single()
-            .unwrap_or_else(|| Utc::now());
+            .unwrap_or_else(Utc::now);
         positions::Model {
             id: Uuid::new_v4(),
             user_id: Uuid::new_v4(),

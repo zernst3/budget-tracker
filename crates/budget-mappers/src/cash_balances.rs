@@ -75,7 +75,7 @@ mod tests {
         let ts = Utc
             .with_ymd_and_hms(2026, 6, 10, 12, 0, 0)
             .single()
-            .unwrap_or_else(|| Utc::now());
+            .unwrap_or_else(Utc::now);
         cash_balances::Model {
             id: Uuid::new_v4(),
             user_id: Uuid::new_v4(),
@@ -98,7 +98,7 @@ mod tests {
         let now = Utc
             .with_ymd_and_hms(2026, 6, 11, 0, 0, 0)
             .single()
-            .unwrap_or_else(|| Utc::now());
+            .unwrap_or_else(Utc::now);
         let id = Uuid::new_v4();
         let user_id = UserId::generate();
         let am = to_active_model(id, user_id, &domain, now);
