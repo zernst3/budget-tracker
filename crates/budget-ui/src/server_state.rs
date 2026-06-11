@@ -529,6 +529,12 @@ pub struct PortfolioState {
     /// The manual cash-balances read/write adapter (`CashBalanceRepository`),
     /// bound to the single app user (`SPEC §9`; see `ManualCashBalanceSource`).
     pub balance_source: Arc<dyn budget_domain::repositories::CashBalanceRepository>,
+    /// The market-data provider for per-ticker quote resolution (`§Phase 3`).
+    /// `MockMarketDataProvider` under (Phase 6) `AI_MODE=mock`; the real adapter
+    /// is an Open Item.
+    pub market: Arc<dyn budget_domain::portfolio::MarketDataProvider>,
+    // The `GeneratePortfolioReview` use-case (`review_service`) is added in
+    // Phase 5; `run_review` stays a stub until Phase 6 wires its body.
 }
 
 impl PortfolioState {
@@ -538,10 +544,12 @@ impl PortfolioState {
     pub fn new(
         position_source: Arc<dyn budget_domain::repositories::PositionRepository>,
         balance_source: Arc<dyn budget_domain::repositories::CashBalanceRepository>,
+        market: Arc<dyn budget_domain::portfolio::MarketDataProvider>,
     ) -> Self {
         Self {
             position_source,
             balance_source,
+            market,
         }
     }
 

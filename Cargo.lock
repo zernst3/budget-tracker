@@ -525,6 +525,7 @@ dependencies = [
  "budget-domain",
  "chrono",
  "chrono-tz",
+ "futures",
  "rust_decimal",
  "serde",
  "serde_json",

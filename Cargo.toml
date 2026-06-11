@@ -37,6 +37,13 @@ tokio = { version = "1.40", features = ["full"] }
 # `#[async_trait]`; impls in budget-infrastructure carry the same macro.
 async-trait = "0.1"
 
+# Concurrency combinators for independent async fan-out
+# (`ARCH-PARALLEL-INDEPENDENT-1`): `try_join_all` over a per-ticker market-quote
+# Vec in the portfolio-review snapshot assembly. `default-features = false`
+# keeps it to the `std`/`alloc` futures-util surface (no executor); the runtime
+# is still the binary's tokio.
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+
 # Time + IDs
 chrono = { version = "0.4", features = ["serde"] }
 # Fixed home-timezone (America/New_York) month-membership resolution (D2 /

@@ -370,6 +370,106 @@ pub fn cash_balance_dto_to_domain(
 }
 
 // ---------------------------------------------------------------------------
+// Snapshot domain -> DTO (Phase 3)
+// ---------------------------------------------------------------------------
+
+/// A quote older than this is flagged stale (`is_stale`) in the snapshot DTO.
+///
+/// Not pinned by the design; chosen as 24h so an end-of-day quote shown the next
+/// morning is flagged rather than silently presented as current. An absent quote
+/// is always stale. (Reconciliation does not key off this flag — a degraded
+/// position has `market_value: None`, which `reconcile` turns into
+/// `MissingMarketData`; the flag is a UI signal only.)
+#[cfg(feature = "server")]
+const STALE_AFTER_HOURS: i64 = 24;
+
+/// Render a domain [`PriceProvenance`](budget_domain::portfolio::PriceProvenance)
+/// to a wire string (`"market:finnhub"` / `"manual"`).
+#[cfg(feature = "server")]
+#[must_use]
+fn provenance_to_string(p: &budget_domain::portfolio::PriceProvenance) -> String {
+    use budget_domain::portfolio::PriceProvenance;
+    match p {
+        PriceProvenance::Market { source } => format!("market:{source}"),
+        PriceProvenance::Manual => "manual".to_owned(),
+    }
+}
+
+/// Render a [`PricedPosition`](budget_domain::portfolio::PricedPosition) to a
+/// [`PricedPositionDto`].
+///
+/// `pct_of_portfolio` is `market_value / total_invested` as a PERCENT (ratio ×
+/// 100) rounded to 1 dp; `None` when the position is unresolved or
+/// `total_invested` is zero. `is_stale` is true when the quote is absent or older
+/// than [`STALE_AFTER_HOURS`].
+#[cfg(feature = "server")]
+#[must_use]
+fn priced_position_to_dto(
+    pp: &budget_domain::portfolio::PricedPosition,
+    total_invested: budget_domain::money::Money,
+    now: chrono::DateTime<chrono::Utc>,
+) -> PricedPositionDto {
+    use rust_decimal::Decimal;
+
+    let pct_of_portfolio = match (pp.market_value, total_invested.as_decimal().is_zero()) {
+        (Some(mv), false) => {
+            let pct = (mv.as_decimal() / total_invested.as_decimal()) * Decimal::from(100);
+            Some(pct.round_dp(1).to_string())
+        }
+        _ => None,
+    };
+
+    let is_stale = match &pp.quote {
+        None => true,
+        Some(q) => (now - q.as_of).num_hours() >= STALE_AFTER_HOURS,
+    };
+
+    PricedPositionDto {
+        ticker: pp.position.ticker.as_str().to_owned(),
+        account_label: pp.position.account_label.clone(),
+        account_type: account_type_to_string(pp.position.account_type).to_owned(),
+        shares: pp.position.shares.to_string(),
+        price: pp.quote.as_ref().map(|q| q.price.as_decimal().to_string()),
+        provenance: pp
+            .quote
+            .as_ref()
+            .map(|q| provenance_to_string(&q.provenance)),
+        as_of: pp.quote.as_ref().map(|q| q.as_of.to_rfc3339()),
+        market_value: pp.market_value.map(|m| m.as_decimal().to_string()),
+        pct_of_portfolio,
+        is_stale,
+    }
+}
+
+/// Render a domain [`PortfolioSnapshot`](budget_domain::portfolio::PortfolioSnapshot)
+/// to a [`PortfolioSnapshotDto`].
+#[cfg(feature = "server")]
+#[must_use]
+pub fn snapshot_to_dto(snap: &budget_domain::portfolio::PortfolioSnapshot) -> PortfolioSnapshotDto {
+    PortfolioSnapshotDto {
+        positions: snap
+            .positions
+            .iter()
+            .map(|pp| priced_position_to_dto(pp, snap.total_invested, snap.captured_at))
+            .collect(),
+        cash_balances: snap
+            .cash_balances
+            .iter()
+            .map(|b| cash_balance_to_dto(None, b))
+            .collect(),
+        buffer_total: snap.buffer_total.as_decimal().to_string(),
+        net_worth: NetWorthDto {
+            total_cash: snap.net_worth.total_cash.as_decimal().to_string(),
+            total_positions: snap.net_worth.total_positions.as_decimal().to_string(),
+            liabilities: snap.net_worth.liabilities.as_decimal().to_string(),
+            total: snap.net_worth.total.as_decimal().to_string(),
+        },
+        total_invested: snap.total_invested.as_decimal().to_string(),
+        captured_at: snap.captured_at.to_rfc3339(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Server-fn error helper
 // ---------------------------------------------------------------------------
 
@@ -543,7 +643,9 @@ pub async fn upsert_cash_balance(input: CashBalanceDto) -> Result<CashBalanceDto
     Ok(cash_balance_to_dto(input.id, &balance))
 }
 
-/// Assemble the grounding snapshot for the authenticated user (Phase 3).
+/// Assemble the grounding snapshot for the authenticated user (`§Phase 3`):
+/// load positions + balances concurrently, fan out market quotes via
+/// `try_join_all` (`ARCH-PARALLEL-INDEPENDENT-1`), and assemble the snapshot.
 ///
 /// # Errors
 /// `ServerFnError` (401) without a valid session; 500 on persistence/market
@@ -551,13 +653,31 @@ pub async fn upsert_cash_balance(input: CashBalanceDto) -> Result<CashBalanceDto
 #[allow(clippy::unused_async)]
 #[server]
 pub async fn portfolio_snapshot() -> Result<PortfolioSnapshotDto, ServerFnError> {
-    // Phase 3 wires this live (load positions + balances, fan out market quotes,
-    // assemble the snapshot). Until then it is a clear 501 rather than a panic.
-    Err(ServerFnError::ServerError {
-        message: "portfolio_snapshot is not implemented until Phase 3".to_owned(),
-        code: 501,
-        details: None,
-    })
+    use crate::server_state::PortfolioState;
+    use crate::services::gate::require_authed_user;
+
+    let user = require_authed_user().await?;
+    let state = PortfolioState::extract().await?;
+
+    // Independent reads: positions + balances concurrently
+    // (`ARCH-PARALLEL-INDEPENDENT-1`).
+    let (positions, balances) = tokio::try_join!(
+        state.position_source.positions_for_user(user.id()),
+        state.balance_source.balances_for_user(user.id()),
+    )
+    .map_err(|e| internal_error(e.to_string()))?;
+
+    let snapshot = budget_app_services::assemble_snapshot(
+        user.id(),
+        positions,
+        balances,
+        state.market.as_ref(),
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(|e| internal_error(e.to_string()))?;
+
+    Ok(snapshot_to_dto(&snapshot))
 }
 
 /// Run the AI portfolio review for the authenticated user (Phase 6).
@@ -740,5 +860,99 @@ mod tests {
             reserved: false,
         };
         assert!(cash_balance_dto_to_domain(&dto).is_err());
+    }
+
+    // -- Phase 3: snapshot DTO mapping ---------------------------------------
+
+    use budget_domain::portfolio::{
+        NetWorth, PortfolioSnapshot, Position, PriceProvenance, PriceQuote, PricedPosition, Ticker,
+    };
+
+    fn priced(ticker: &str, shares: i64, mv_cents: Option<i64>, fresh: bool) -> PricedPosition {
+        let now = Utc::now();
+        let position = Position {
+            id: PositionId::generate(),
+            user_id: UserId::generate(),
+            ticker: Ticker::try_new(ticker).unwrap(),
+            account_label: "Brokerage".to_owned(),
+            account_type: AccountType::Investment,
+            shares: rust_decimal::Decimal::new(shares, 0),
+            cost_basis: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let quote = mv_cents.map(|_| PriceQuote {
+            price: Money::from_minor(18_000),
+            provenance: PriceProvenance::Market {
+                source: "finnhub".to_owned(),
+            },
+            // Fresh = now; stale = 48h ago (>= STALE_AFTER_HOURS).
+            as_of: if fresh {
+                now
+            } else {
+                now - chrono::Duration::hours(48)
+            },
+        });
+        PricedPosition {
+            position,
+            quote,
+            market_value: mv_cents.map(Money::from_minor),
+        }
+    }
+
+    fn snapshot(positions: Vec<PricedPosition>, total_invested_cents: i64) -> PortfolioSnapshot {
+        PortfolioSnapshot {
+            user_id: UserId::generate(),
+            positions,
+            cash_balances: vec![],
+            buffer_total: Money::ZERO,
+            net_worth: NetWorth {
+                total_cash: Money::ZERO,
+                total_positions: Money::from_minor(total_invested_cents),
+                liabilities: Money::ZERO,
+                total: Money::from_minor(total_invested_cents),
+            },
+            total_invested: Money::from_minor(total_invested_cents),
+            captured_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn snapshot_dto_renders_pct_to_one_dp_and_skips_unresolved() {
+        // AAPL $1800 of $4300 -> 41.86% -> "41.9"; NVDA unresolved -> None pct.
+        let snap = snapshot(
+            vec![
+                priced("AAPL", 10, Some(180_000), true),
+                priced("NVDA", 5, None, true),
+            ],
+            430_000,
+        );
+        let dto = snapshot_to_dto(&snap);
+        let aapl = dto.positions.iter().find(|p| p.ticker == "AAPL").unwrap();
+        assert_eq!(aapl.pct_of_portfolio, Some("41.9".to_owned()));
+        assert_eq!(aapl.market_value, Some("1800.00".to_owned()));
+        assert_eq!(aapl.provenance, Some("market:finnhub".to_owned()));
+        assert!(!aapl.is_stale);
+
+        let nvda = dto.positions.iter().find(|p| p.ticker == "NVDA").unwrap();
+        assert_eq!(nvda.pct_of_portfolio, None);
+        assert_eq!(nvda.market_value, None);
+        assert!(nvda.is_stale, "an unresolved quote is stale");
+        assert_eq!(nvda.price, None);
+    }
+
+    #[test]
+    fn snapshot_dto_flags_old_quote_as_stale() {
+        let snap = snapshot(vec![priced("AAPL", 10, Some(180_000), false)], 180_000);
+        let dto = snapshot_to_dto(&snap);
+        assert!(dto.positions[0].is_stale, "a 48h-old quote is stale");
+    }
+
+    #[test]
+    fn snapshot_dto_pct_is_none_when_total_invested_zero() {
+        // Resolved market_value but total_invested 0 -> no division.
+        let snap = snapshot(vec![priced("AAPL", 10, Some(0), true)], 0);
+        let dto = snapshot_to_dto(&snap);
+        assert_eq!(dto.positions[0].pct_of_portfolio, None);
     }
 }

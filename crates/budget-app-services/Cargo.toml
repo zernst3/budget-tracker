@@ -30,6 +30,11 @@ tracing = { workspace = true }
 # (D1: server functions -> services -> repositories).
 async-trait = { workspace = true }
 
+# `try_join_all` for the concurrent per-ticker market-quote fan-out in the
+# portfolio-review snapshot assembly (`ARCH-PARALLEL-INDEPENDENT-1`). Executor-
+# free futures-util surface; WASM-compatible (no tokio).
+futures = { workspace = true }
+
 [dev-dependencies]
 # A minimal runtime to drive the async service tests (`#[tokio::test]`).
 # `rt-multi-thread` is required only by the #[ignore]d live-DB concurrency

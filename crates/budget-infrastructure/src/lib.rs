@@ -24,6 +24,7 @@
 pub mod auth;
 pub mod conn;
 pub mod error;
+pub mod market_data;
 pub mod plaid;
 pub mod portfolio_sources;
 pub mod repositories;
@@ -47,6 +48,11 @@ pub use uow::{SeaOrmUow, SeaOrmUowProvider};
 // persistence adapters the positions UI mutates through and the review use-case
 // grounds against.
 pub use portfolio_sources::{ManualCashBalanceSource, ManualPositionSource};
+
+// Market-data adapters for AI Portfolio Insights (`§Phase 3`): the
+// fixture-configured `MockMarketDataProvider` (the real HTTP adapter is an Open
+// Item, returns `Err` until a provider is confirmed).
+pub use market_data::{MockMarketDataProvider, MockQuote};
 
 // Plaid integration (build step 8, SPEC §6): the reqwest HTTP client + the
 // cursor-sync/reconcile engine. Both implement domain ports so the service layer
