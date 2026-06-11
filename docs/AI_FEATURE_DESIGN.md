@@ -2,6 +2,8 @@
 
 Status: LOCKED. Every signature, field, constant, and table column below is final and one-way-door. This document is the single source of truth handed to the build agent. It is organized by build phase (§Phase 0 through §Phase 7); each phase lists the exact files to touch, the types and signatures to write, and the test list to satisfy.
 
+Amended 2026-06-11 (Zach sign-off at §1.H.1): added `AdvisorOutput.finish_reason`, `Recommendation.confidence` (`Confidence` enum), `ClaimSubject::CostBasisGain`.
+
 Provenance: mirrors `plaid_api.rs` (port + DTO shape), `auth.rs::SecretVault` (vault port + error category), `plaid/wire.rs` (wire isolation), `MockPlaidApi` (fixture-driven mock), `money.rs` (exact arithmetic, `from_minor`, `round_to_cents`), `config.rs::DeficitFinancingConfig` (pinned-constant style), `m0004` (migration hygiene).
 
 ---
@@ -13,7 +15,7 @@ The five invariants the judgment tier was required to verify, and their resoluti
 | # | Invariant | Result |
 |---|---|---|
 | 1 | `InvestmentAdvisor` port surface exactly matches what `GeneratePortfolioReview` consumes | **PASS** — see §0.1 |
-| 2 | `reconcile()` is an exhaustive match over every `ClaimSubject` variant | **PASS** — see §0.2 |
+| 2 | `reconcile()` is an exhaustive match over every `ClaimSubject` variant (four) | **PASS** — see §0.2 |
 | 3 | No domain type carries an http/wire/Gemini dependency | **PASS** — see §0.3 |
 | 4 | `review_runs` columns match exactly what app-services writes | **PASS with one mismatch resolved** — see §0.4 |
 | 5 | The wire structs map 1:1 to `Claim`/`ClaimSubject` | **PASS with one naming mismatch resolved** — see §0.5 |
@@ -27,20 +29,20 @@ async fn recommend(&self, snapshot: &PortfolioSnapshot) -> Result<AdvisorOutput,
 fn model_id(&self) -> &str;
 ```
 
-`AdvisorOutput { recommendations, raw_output, prompt_hash, prompt_tokens, completion_tokens }`.
+`AdvisorOutput { recommendations, raw_output, prompt_hash, prompt_tokens, completion_tokens, finish_reason }`.
 
 The use-case (§Phase-5 flow) consumes exactly this surface:
 - `advisor.recommend(&snapshot)` — the only call.
 - `Err(AdvisorError::Parse(raw))` → persist `MalformedOutput` with the raw string. The raw string is also carried inside `AdvisorOutput.raw_output` on the success path; on the `Parse` error path it travels in the error payload. Both paths feed `review_runs.raw_output`. Consistent.
 - `advisor.model_id()` → `review_runs.model_id`.
-- `AdvisorOutput.{prompt_hash, prompt_tokens, completion_tokens}` → the matching `review_runs` columns.
+- `AdvisorOutput.{prompt_hash, prompt_tokens, completion_tokens, finish_reason}` → the matching `review_runs` columns. `finish_reason` is the model's stop reason (truncation / safety-stop audit), mapped through from the Gemini wire's `WireCandidate.finish_reason`; `None` on the mock and parse-failure paths.
 - `AdvisorOutput.recommendations` → reconciled, then `outcomes`.
 
 Every field the use-case writes to the audit row is sourced either from `AdvisorOutput`, from `model_id()`, or computed locally (`latency_ms`, `occurred_at`, `snapshot`). **No field is consumed that the port does not provide. No field the port provides is dropped except by deliberate design (`AdvisorOutput.raw_output` is persisted; nothing else is unused).**
 
 ### 0.2 reconcile() exhaustiveness (PASS)
 
-`ClaimSubject` has exactly three variants: `Position { ticker }`, `Buffer`, `NetWorth`. `reconcile_claim` matches all three with no wildcard arm. Adding a fourth variant is a compile error — this is the `BUDGET-AI-1` enforcement mechanism and must never be defeated with a `_ =>` arm.
+`ClaimSubject` has exactly FOUR variants: `Position { ticker }`, `Buffer`, `NetWorth`, `CostBasisGain { ticker }`. `reconcile_claim` matches all four with no wildcard arm. Adding a fifth variant is a compile error — this is the `BUDGET-AI-1` enforcement mechanism and must never be defeated with a `_ =>` arm. (`CostBasisGain` was added 2026-06-11; its reconcile arm is built with Phase 5 — see §Phase 5.)
 
 ### 0.3 Domain dependency isolation (PASS)
 
@@ -67,6 +69,7 @@ All other columns match exactly:
 | `terminal_state` | classified `ReviewTerminalState` | `terminal_state: ReviewTerminalStateEntity` |
 | `prompt_tokens` | `AdvisorOutput.prompt_tokens` | `prompt_tokens: Option<i64>` |
 | `completion_tokens` | `AdvisorOutput.completion_tokens` | `completion_tokens: Option<i64>` |
+| `finish_reason` | `AdvisorOutput.finish_reason` (`None` on mock / parse-failure) | `finish_reason: Option<String>` |
 | `latency_ms` | measured around `recommend()` | `latency_ms: i64` |
 | `occurred_at` | use-case `now` arg | `occurred_at: DateTimeWithTimeZone` |
 
@@ -79,9 +82,10 @@ Note on the entity enum name: two module designs named the entity enum `ReviewTe
 - `kind == "position"` + `ticker: Some(t)` → `ClaimSubject::Position { ticker: Ticker::try_new(t)? }`
 - `kind == "buffer"` → `ClaimSubject::Buffer`
 - `kind == "net_worth"` → `ClaimSubject::NetWorth`
-- any other `kind`, or `"position"` without a ticker → `AdvisorError::Parse`
+- `kind == "cost_basis_gain"` + `ticker: Some(t)` → `ClaimSubject::CostBasisGain { ticker: Ticker::try_new(t)? }`
+- any other `kind`, or `"position"` / `"cost_basis_gain"` without a ticker → `AdvisorError::Parse`
 
-**Resolution (LOCKED):** the wire discriminant string for `NetWorth` is the snake_case `"net_worth"` (not `"networth"` / `"NetWorth"`). The Gemini `responseSchema` enum for the subject `type` field MUST be exactly `["position", "buffer", "net_worth"]`. The fixture JSON and the `responseSchema` share this constant; a drift fails the mock's round-trip test. This is the single place the wire and domain vocabularies meet, so it is pinned here.
+**Resolution (LOCKED):** the wire discriminant string for `NetWorth` is the snake_case `"net_worth"` (not `"networth"` / `"NetWorth"`); for `CostBasisGain` it is the snake_case `"cost_basis_gain"`. The Gemini `responseSchema` enum for the subject `type` field MUST be exactly `["position", "buffer", "net_worth", "cost_basis_gain"]`. The fixture JSON and the `responseSchema` share this constant; a drift fails the mock's round-trip test. This is the single place the wire and domain vocabularies meet, so it is pinned here.
 
 ---
 
@@ -243,10 +247,22 @@ pub struct PortfolioSnapshot {
 #### Recommendation / Claim / ClaimSubject
 
 ```rust
+/// The model's SELF-REPORTED confidence — a DISPLAY signal only (drives the
+/// "low-confidence flagged" guardrail). NOT reconciled against ground truth and
+/// NOT part of BUDGET-AI-1. Rides inside review_runs.recommendations JSONB.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Confidence {
+    High,
+    Medium,
+    Low,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Recommendation {
     pub title: String,
     pub rationale: String,
+    /// Model self-reported confidence — display only, not reconciled (§added 2026-06-11).
+    pub confidence: Confidence,
     pub claims: Vec<Claim>,
 }
 
@@ -265,6 +281,9 @@ pub enum ClaimSubject {
     Position { ticker: Ticker },
     Buffer,
     NetWorth,
+    /// A holding's unrealized gain (market_value - cost_basis). Added 2026-06-11;
+    /// reconcile arm built with Phase 5 (§Phase 5).
+    CostBasisGain { ticker: Ticker },
 }
 ```
 
@@ -306,6 +325,9 @@ pub struct ReviewRun {
     pub terminal_state: ReviewTerminalState,
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
+    /// Model stop/finish reason (truncation / safety-stop audit); None on the
+    /// short-circuit / parse-failure paths. Written from AdvisorOutput.finish_reason.
+    pub finish_reason: Option<String>,
     pub latency_ms: i64,
     pub occurred_at: DateTime<Utc>,
 }
@@ -349,6 +371,9 @@ pub struct AdvisorOutput {
     pub prompt_hash: String,
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
+    /// Model stop/finish reason, mapped through from WireCandidate.finish_reason.
+    /// None on the mock and parse-failure paths.
+    pub finish_reason: Option<String>,
 }
 
 #[async_trait]
@@ -424,7 +449,7 @@ pub trait CashBalanceRepository: CashBalanceSource {
 
 **`cash_balances.rs`** — `Model { id, user_id, account_label: String, balance: Decimal, reserved: bool, created_at, updated_at }`. `Relation::User` Cascade. Empty `ActiveModelBehavior`. Doc cites `m0007` + `(user_id, account_label)` unique + `BUDGET-CASH-1`.
 
-**`review_runs.rs`** — declares `ReviewTerminalStateEntity` (`DeriveActiveEnum`, `enum_name = "review_terminal_state"`, string values `completed`/`no_verifiable_insights`/`empty_portfolio`/`malformed_output`). `Model { id, user_id, model_id: String, prompt_hash: String, raw_output: String, snapshot: Json, outcomes: Json, recommendations: Json, terminal_state: ReviewTerminalStateEntity, prompt_tokens: Option<i64>, completion_tokens: Option<i64>, latency_ms: i64, occurred_at: DateTimeWithTimeZone }`. `Relation::User` Cascade; NO reverse `has_many` (audit-log semantics). NO `updated_at` (append-only). Empty `ActiveModelBehavior`. Doc cites `m0007` + `SQL-AUDIT-COLUMNS-1`.
+**`review_runs.rs`** — declares `ReviewTerminalStateEntity` (`DeriveActiveEnum`, `enum_name = "review_terminal_state"`, string values `completed`/`no_verifiable_insights`/`empty_portfolio`/`malformed_output`). `Model { id, user_id, model_id: String, prompt_hash: String, raw_output: String, snapshot: Json, outcomes: Json, recommendations: Json, terminal_state: ReviewTerminalStateEntity, prompt_tokens: Option<i64>, completion_tokens: Option<i64>, finish_reason: Option<String>, latency_ms: i64, occurred_at: DateTimeWithTimeZone }`. `Relation::User` Cascade; NO reverse `has_many` (audit-log semantics). NO `updated_at` (append-only). Empty `ActiveModelBehavior`. Doc cites `m0007` + `SQL-AUDIT-COLUMNS-1`.
 
 ### 1.F Migration `m0007_portfolio_insights.rs`
 
@@ -436,7 +461,7 @@ Raw guarded DDL mirroring `m0004`. Idempotent `CREATE TYPE` in a `duplicate_obje
 
 `cash_balances` columns: `id UUID PK`, `user_id UUID NOT NULL`, `account_label TEXT NOT NULL`, `balance NUMERIC NOT NULL`, `reserved BOOLEAN NOT NULL DEFAULT false`, `created_at`/`updated_at TIMESTAMPTZ NOT NULL`.
 
-`review_runs` columns (system-log, `SQL-AUDIT-COLUMNS-1`, no `created_by`/`modified_by`, no `updated_at`): `id UUID PK`, `user_id UUID NOT NULL`, `model_id TEXT NOT NULL`, `prompt_hash TEXT NOT NULL`, `raw_output TEXT NOT NULL`, `snapshot JSONB NOT NULL`, `outcomes JSONB NOT NULL`, `recommendations JSONB NOT NULL` (§0.4-addendum), `terminal_state review_terminal_state NOT NULL`, `prompt_tokens BIGINT`, `completion_tokens BIGINT`, `latency_ms BIGINT NOT NULL`, `occurred_at TIMESTAMPTZ NOT NULL`.
+`review_runs` columns (system-log, `SQL-AUDIT-COLUMNS-1`, no `created_by`/`modified_by`, no `updated_at`): `id UUID PK`, `user_id UUID NOT NULL`, `model_id TEXT NOT NULL`, `prompt_hash TEXT NOT NULL`, `raw_output TEXT NOT NULL`, `snapshot JSONB NOT NULL`, `outcomes JSONB NOT NULL`, `recommendations JSONB NOT NULL` (§0.4-addendum), `terminal_state review_terminal_state NOT NULL`, `prompt_tokens BIGINT`, `completion_tokens BIGINT`, `finish_reason TEXT` (nullable; model stop reason, added 2026-06-11), `latency_ms BIGINT NOT NULL`, `occurred_at TIMESTAMPTZ NOT NULL`.
 
 `down`: drop in reverse dependency order — indexes → constraints → tables (review_runs, cash_balances, positions) → `DROP TYPE IF EXISTS review_terminal_state` last.
 
@@ -455,7 +480,7 @@ Register in `lib.rs`: `mod m0007_portfolio_insights;` + `Box::new(m0007_portfoli
 - **Domain `Ticker` (in `portfolio.rs`):** normalises lowercase→upper; accepts `BRK.A`; accepts single letter; rejects empty, >10 chars, digits, embedded space; round-trips through Display/`into_string`.
 - **Mapper `positions.rs`:** round-trips an investment position; rejects an invalid stored ticker → `InvalidStoredValue`; null `cost_basis` → `None`.
 - **Mapper `cash_balances.rs`:** reserved balance round-trips; non-reserved maps correctly.
-- **Migration `m0007` (DB-free structural, mirror `m0004`):** enum created + guarded with all 4 variants; each of the 3 tables `CREATE TABLE IF NOT EXISTS`; `positions` columns + nullable `cost_basis` + composite unique + FK index; `cash_balances` `reserved BOOLEAN NOT NULL DEFAULT false` + FK index + composite unique; `review_runs` all columns (incl. `recommendations JSONB NOT NULL`) + nullable token columns + NO `updated_at` + FK index + `(user_id, occurred_at DESC)` history index; `down` drops in dependency order (review_runs before enum), all tables + indexes `IF EXISTS`.
+- **Migration `m0007` (DB-free structural, mirror `m0004`):** enum created + guarded with all 4 variants; each of the 3 tables `CREATE TABLE IF NOT EXISTS`; `positions` columns + nullable `cost_basis` + composite unique + FK index; `cash_balances` `reserved BOOLEAN NOT NULL DEFAULT false` + FK index + composite unique; `review_runs` all columns (incl. `recommendations JSONB NOT NULL`) + nullable token columns + nullable `finish_reason TEXT` + NO `updated_at` + FK index + `(user_id, occurred_at DESC)` history index; `down` drops in dependency order (review_runs before enum), all tables + indexes `IF EXISTS`.
 
 ### 1.H.1 HARD PAUSE — InvestmentAdvisor surface sign-off
 
@@ -508,7 +533,7 @@ PortfolioSnapshotDto { positions: Vec<PricedPositionDto>, cash_balances: Vec<Cas
                        buffer_total: String, net_worth: NetWorthDto, total_invested: String, captured_at: String }
 ClaimDto { subject: String, cited_value: String, cited_percentage: Option<String>, badge: ValidationBadgeDto }
 #[serde(tag="kind")] enum ValidationBadgeDto { Verified, Unverified { reason: String } }
-RecommendationDto { title, rationale, badge: ValidationBadgeDto, claims: Vec<ClaimDto>, tax_note: Option<String> }
+RecommendationDto { title, rationale, confidence: String, badge: ValidationBadgeDto, claims: Vec<ClaimDto>, tax_note: Option<String> }
 enum ReviewTerminalStateDto { Completed, NoVerifiableInsights, EmptyPortfolio, MalformedOutput }
 ReviewResultDto { run_id: Uuid, terminal_state: ReviewTerminalStateDto,
                   recommendations: Vec<RecommendationDto>, disclaimer: &'static str }
@@ -516,7 +541,9 @@ ReviewResultDto { run_id: Uuid, terminal_state: ReviewTerminalStateDto,
 pub const PORTFOLIO_REVIEW_DISCLAIMER: &str = "...not financial advice...";  // N3, on every result
 ```
 
-> `ClaimDto` subject rendering: the locked decisions and one module draft used a single `subject: String` human string; another used `subject_type: String` + `ticker: Option<String>`. **Resolution (LOCKED):** `ClaimDto.subject` is a single pre-rendered human string (`"AAPL market value"`, `"Reserved cash buffer"`, `"Total net worth"`) produced by the mapper. Raw subject discriminants and raw `UnverifiedReason` codes NEVER cross to the client (`RUST-DIOXUS-10`).
+> `ClaimDto` subject rendering: the locked decisions and one module draft used a single `subject: String` human string; another used `subject_type: String` + `ticker: Option<String>`. **Resolution (LOCKED):** `ClaimDto.subject` is a single pre-rendered human string (`"AAPL market value"`, `"Reserved cash buffer"`, `"Total net worth"`, `"AAPL unrealized gain"` for `CostBasisGain`) produced by the mapper's `subject_to_display`. Raw subject discriminants and raw `UnverifiedReason` codes NEVER cross to the client (`RUST-DIOXUS-10`).
+
+> `RecommendationDto.confidence` is the model's self-reported `Confidence` rendered to a display string (`"high"`/`"medium"`/`"low"`) by the mapper — a DISPLAY signal only (drives the "low-confidence flagged" UI guardrail), NEVER reconciled and NEVER part of `BUDGET-AI-1` (added 2026-06-11).
 
 ### `PortfolioState` (server_state.rs)
 
@@ -587,7 +614,7 @@ pub(crate) struct WireClaimSubject { #[serde(rename="type")] kind: String, ticke
 pub(crate) fn parse_advisor_response(wire: GeminiResponse) -> Result<AdvisorOutput, AdvisorError>;
 ```
 
-`parse_advisor_response`: take first candidate; extract `usage`; extract `parts[0].text` as the structured JSON string (JSON-in-text variant — confirm at Phase 6, see Open Items); `serde_json::from_str` → `WireRecommendations`; map each via `wire_rec_to_domain` → `wire_claim_to_domain`. `cited_value` via `Money::try_parse`; `cited_percentage` via `Decimal::from_str`; subject via the §0.5 `kind` mapping (`"position"`/`"buffer"`/`"net_worth"`). `prompt_hash` is left empty here (the real `GeminiAdvisor` fills it over the rendered prompt; the mock stubs it).
+`parse_advisor_response`: take first candidate; extract `usage`; extract `parts[0].text` as the structured JSON string (JSON-in-text variant — confirm at Phase 6, see Open Items); `serde_json::from_str` → `WireRecommendations`; map each via `wire_rec_to_domain` → `wire_claim_to_domain`. `cited_value` via `Money::try_parse`; `cited_percentage` via `Decimal::from_str`; subject via the §0.5 `kind` mapping (`"position"`/`"buffer"`/`"net_worth"`/`"cost_basis_gain"`); `confidence` via the wire enum (`"high"`/`"medium"`/`"low"`, added Phase 6 schema). Map the candidate's `finish_reason` into `AdvisorOutput.finish_reason` (`Some(reason)`); the mock stubs `finish_reason: None`. `prompt_hash` is left empty here (the real `GeminiAdvisor` fills it over the rendered prompt; the mock stubs it).
 
 ### mock.rs
 
@@ -610,6 +637,8 @@ impl MockInvestmentAdvisor {
 - `gemini_verified.json` — all cited values match the canonical test snapshot exactly (AAPL $1800, buffer $5000). ≥1 verifiable recommendation.
 - `gemini_hallucinated.json` — REQUIRED. Three deliberate fabrications: (a) `Position{TSLA}` not in snapshot → `UnknownTicker`; (b) `Position{AAPL}` cited `$50,000` vs truth `$1800` → `ValueMismatch`; (c) `Buffer` cited `$3000` vs truth `$5000` → `ValueMismatch`. (The §locked-decisions variant of (c) using an illegal `cited_percentage` to force `MalformedClaim` is covered by a pure-domain reconcile unit test instead; the fixture uses the wrong-figure form so it round-trips cleanly through the wire schema.)
 - `gemini_empty_recs.json` — valid JSON, `"recommendations":[]` → drives `NoVerifiableInsights`.
+
+Each recommendation fixture also carries a `confidence` field (`"high"`/`"medium"`/`"low"`). A `cost_basis_gain` claim MAY appear in a fixture (subject `type: "cost_basis_gain"` + `ticker`); its reconcile behaviour is exercised in Phase 5 once the reconcile arm exists.
 
 ### Phase 4 tests
 - Round-trip fidelity: each fixture deserializes through `GeminiResponse` and `parse_advisor_response` succeeds (verified → ≥1 rec; hallucinated → exactly 3 recs; empty → 0 recs).
@@ -662,6 +691,11 @@ pub fn reconcile(rec: &Recommendation, snap: &PortfolioSnapshot) -> ReconcileRes
 - **`Position { ticker }`:** resolve in `snap.positions`; not found → `UnknownTicker`. Found but `market_value == None` → `MissingMarketData`. Else `|cited_value - market_value| > MONEY_BAND` → `ValueMismatch`. If `cited_percentage = Some(p)`: with `total_invested == 0` → `PercentageMismatch{ground_truth: 0}`; else `ground = (market_value / total_invested).round_dp(1)`, `p.round_dp(1) != ground` → `PercentageMismatch`. Else `Verified`.
 - **`Buffer`:** `|cited_value - snap.buffer_total| > MONEY_BAND` → `ValueMismatch` else `Verified`.
 - **`NetWorth`:** `|cited_value - snap.net_worth.total| > MONEY_BAND` → `ValueMismatch` else `Verified`.
+- **`CostBasisGain { ticker }`** (added 2026-06-11): resolve `ticker` in `snap.positions`; not found → `UnknownTicker`. Found but `market_value == None` → `MissingMarketData(ticker)`. Found but the position's `cost_basis == None` → `MissingMarketData(ticker)` (the unrealized gain cannot be computed without cost basis; reuses the "a required figure is missing" semantics rather than a new reason — see the type-level decision note below). Else ground truth = `market_value - cost_basis`; `|cited_value - ground_truth| > MONEY_BAND` → `ValueMismatch` else `Verified`. Like `Buffer`/`NetWorth`, a `cited_percentage.is_some()` on a `CostBasisGain` claim is a `MalformedClaim` (handled by the same first guard — percentage is `Position`-only).
+
+> `CostBasisGain` no-cost-basis reason (DECISION 2026-06-11): a position with `cost_basis: None` reconciles to `Unverified(MissingMarketData(ticker))` rather than a dedicated `MissingCostBasis` reason. Rationale: the failure category is identical ("a required ground-truth figure is absent, so the claim cannot be verified"), `MissingMarketData` already carries the ticker, and adding a `UnverifiedReason` variant would force a new `unverified_reason_to_string` arm + DTO rendering for no display benefit. FOLLOW-UP: if the UI copy needs to distinguish "no price" from "no cost basis", introduce a `MissingCostBasis(String)` reason then.
+
+> `Confidence` is display-only: it is NOT read by `reconcile` and is NOT a `BUDGET-AI-1` input. It flows straight through to `RecommendationDto.confidence` for the low-confidence UI flag.
 
 Recommendation outcome = first `Unverified` across claims, else `Verified`. A zero-claim recommendation is `Verified` (vacuous).
 
@@ -722,13 +756,13 @@ crates/budget-ui/src/views/portfolio_review.rs       insight cards + badges + di
 ```
 
 ### GeminiAdvisor
-`new(vault: Arc<dyn SecretVault>, model_id: String)` — `model_id` config-resolved from `GEMINI_MODEL_ID`, never hardcoded (`ORCH-TRAINING-CUTOFF-1`). Builds the prompt from the snapshot, sets `response_mime_type: application/json` + a `responseSchema` mirroring the `Claim`/`ClaimSubject` shape (subject `type` enum exactly `["position","buffer","net_worth"]`, §0.5), calls Gemini, computes `prompt_hash = sha256(rendered_prompt)`, parses via `parse_advisor_response`, returns `AdvisorOutput`. Parse failure → `AdvisorError::Parse(raw)`. Deps: `reqwest`, `sha2`, `hex`.
+`new(vault: Arc<dyn SecretVault>, model_id: String)` — `model_id` config-resolved from `GEMINI_MODEL_ID`, never hardcoded (`ORCH-TRAINING-CUTOFF-1`). Builds the prompt from the snapshot, sets `response_mime_type: application/json` + a `responseSchema` mirroring the `Claim`/`ClaimSubject` shape (subject `type` enum exactly `["position","buffer","net_worth","cost_basis_gain"]`, §0.5; plus a per-recommendation `confidence` enum field exactly `["high","medium","low"]`), calls Gemini, computes `prompt_hash = sha256(rendered_prompt)`, parses via `parse_advisor_response` (which carries the candidate's `finish_reason` into `AdvisorOutput.finish_reason`), returns `AdvisorOutput`. Parse failure → `AdvisorError::Parse(raw)`. Deps: `reqwest`, `sha2`, `hex`.
 
 ### AI_MODE=mock wiring (mirror PLAID_MODE=mock — STAGE-1 safety)
 Only the exact string `AI_MODE=mock` selects `MockInvestmentAdvisor::default_mock()` + `MockMarketDataProvider` + in-memory vault, with a `WARN` log. Anything else / unset → real `GeminiAdvisor` + real `MarketDataProvider` + real vault (requires `KEY_VAULT_URL` + `GEMINI_MODEL_ID`, else the server fn returns 503). A misconfigured prod can never silently reach the mock.
 
 ### review_run mapper (Phase 6)
-`review_run_to_dto(&ReviewRun) -> ReviewResultDto`: zips `run.recommendations[i]` with `outcomes` by index; `outcome_to_badge` renders `ValidationOutcome` → `ValidationBadgeDto`; `unverified_reason_to_string` renders each `UnverifiedReason` to a human string at THIS boundary (`RUST-DIOXUS-10`, raw codes never reach the client); `subject_to_display` renders `ClaimSubject`; `terminal_state_to_dto` maps the enum; `tax_note` computed deterministically from cited positions' `account_type` (N2), never from model output; `disclaimer = PORTFOLIO_REVIEW_DISCLAIMER`.
+`review_run_to_dto(&ReviewRun) -> ReviewResultDto`: zips `run.recommendations[i]` with `outcomes` by index; `outcome_to_badge` renders `ValidationOutcome` → `ValidationBadgeDto`; `unverified_reason_to_string` renders each `UnverifiedReason` to a human string at THIS boundary (`RUST-DIOXUS-10`, raw codes never reach the client); `subject_to_display` renders `ClaimSubject` (incl. `CostBasisGain { ticker }` → `"{ticker} unrealized gain"`); `confidence_to_display` renders `Confidence` → `"high"`/`"medium"`/`"low"` for `RecommendationDto.confidence` (display-only, never reconciled); `terminal_state_to_dto` maps the enum; `tax_note` computed deterministically from cited positions' `account_type` (N2), never from model output; `disclaimer = PORTFOLIO_REVIEW_DISCLAIMER`. The review_runs mapper also round-trips `finish_reason: Option<String>` to/from the entity (no DTO surfacing — audit-only).
 
 ### run_review server fn
 `require_authed_user` → `PortfolioState::extract` → `service.generate_portfolio_review(user.id(), Utc::now())` → `review_run_to_dto`. Returns `Ok(ReviewResultDto)` even for `MalformedOutput`/`EmptyPortfolio` (terminal_state communicates the outcome).
