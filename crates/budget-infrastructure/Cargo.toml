@@ -134,6 +134,17 @@ reqwest = { version = "0.13", default-features = false, features = [
 # The live integration tests (repositories_live.rs) gate themselves on
 # DATABASE_URL and no-op in CI until Neon is provisioned (SPEC §12).
 [dev-dependencies]
+# DEV-ONLY edge (not a library dependency, so the strict downward layering of
+# the infrastructure LIBRARY per the note above is preserved): the
+# `tests/advisor_mock.rs` integration test feeds the mock advisor's hallucinated
+# fixture through the app-services `reconcile` firewall (`BUDGET-AI-1`
+# enforcement, `docs/AI_FEATURE_DESIGN.md §Phase 5`). Acyclic: app-services does
+# not depend on infrastructure.
+budget-app-services = { path = "../budget-app-services" }
+budget-domain = { path = "../budget-domain" }
+chrono = { workspace = true }
+rust_decimal = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 sea-orm = { workspace = true, features = ["mock"] }
 # The AuthedUser-gate harness drives the router via tower's oneshot and an
 # in-memory session store (no Postgres needed for the gate test).

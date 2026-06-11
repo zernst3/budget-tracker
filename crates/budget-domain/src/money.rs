@@ -57,6 +57,31 @@ impl Money {
         Money(Decimal::new(cents, 2))
     }
 
+    /// `const` construction from minor units (cents), for pinned tolerance
+    /// constants (`docs/AI_FEATURE_DESIGN.md §Phase 5`: `MONEY_BAND`).
+    ///
+    /// [`Money::from_minor`] calls [`Decimal::new`], which is NOT `const` in
+    /// `rust_decimal` 1.x, so it cannot back a `const`. This constructor uses
+    /// [`Decimal::from_parts`] (which IS `const`, exactly as
+    /// `DeficitFinancingConfig`'s pinned ratio does) to build the same exact value
+    /// at compile time. The full `i64` range is supported: the magnitude's low and
+    /// high 32 bits feed `lo`/`mid` of the 96-bit mantissa (`hi = 0`), scale `2`.
+    ///
+    /// Exactness: `from_minor_const(cents) == from_minor(cents)` for every `i64`
+    /// (pinned by a test).
+    #[must_use]
+    pub const fn from_minor_const(cents: i64) -> Self {
+        let negative = cents < 0;
+        let magnitude = cents.unsigned_abs();
+        // Split the u64 magnitude across the low two 32-bit words of the 96-bit
+        // mantissa; `hi` is always 0 because |i64| < 2^64.
+        #[allow(clippy::cast_possible_truncation)]
+        let lo = magnitude as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let mid = (magnitude >> 32) as u32;
+        Money(Decimal::from_parts(lo, mid, 0, negative, 2))
+    }
+
     /// Parse a decimal string (e.g. `"12.34"`, `"-5.98"`) into exact money.
     ///
     /// `DOMAIN-3`-style fallible constructor. Returns [`ValidationError::Money`]
@@ -199,6 +224,34 @@ mod tests {
         // Compare the whole Result so no value-unwrapping is needed.
         assert_eq!(Money::try_parse("a", "12.34"), Ok(Money::from_minor(1234)));
         assert_eq!(Money::try_parse("a", "-5.98"), Ok(Money::from_minor(-598)));
+    }
+
+    #[test]
+    fn from_minor_const_matches_from_minor_across_the_range() {
+        // The const constructor (for pinned tolerance constants) must equal the
+        // runtime one for every i64, including the extremes and both signs.
+        for cents in [
+            0_i64,
+            1,
+            -1,
+            99,
+            -99,
+            1_234,
+            -598,
+            5_000_000,
+            -5_000_000,
+            i64::MAX,
+            i64::MIN + 1,
+        ] {
+            assert_eq!(
+                Money::from_minor_const(cents),
+                Money::from_minor(cents),
+                "from_minor_const drifted from from_minor at {cents}"
+            );
+        }
+        // The pinned one-cent band, available as a genuine const.
+        const ONE_CENT: Money = Money::from_minor_const(1);
+        assert_eq!(ONE_CENT, Money::from_minor(1));
     }
 
     #[test]

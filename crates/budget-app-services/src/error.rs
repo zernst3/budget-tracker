@@ -58,6 +58,18 @@ pub enum ServiceError {
         /// Which specific unbuilt path was selected.
         detail: &'static str,
     },
+
+    /// A retryable transport failure from the [`InvestmentAdvisor`] port that is
+    /// NOT a parse failure (`docs/AI_FEATURE_DESIGN.md §Phase 5`): an `Api`,
+    /// `RateLimited`, `Unavailable`, or `SecretVault` advisor error. The
+    /// portfolio-review use-case maps every non-`Parse` advisor error here and
+    /// does NOT persist a `ReviewRun` (the call can be retried); a `Parse` failure
+    /// instead persists a `MalformedOutput` run with the raw output. Carries only
+    /// a `String` — never the API key or an HTTP status (`§0.3`).
+    ///
+    /// [`InvestmentAdvisor`]: budget_domain::portfolio::InvestmentAdvisor
+    #[error("portfolio advisor transport failure: {0}")]
+    AdvisorTransport(String),
 }
 
 impl From<budget_domain::error::RepositoryError> for ServiceError {

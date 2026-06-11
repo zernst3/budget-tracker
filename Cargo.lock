@@ -571,6 +571,7 @@ dependencies = [
  "azure_identity",
  "azure_security_keyvault_secrets",
  "base64 0.22.1",
+ "budget-app-services",
  "budget-domain",
  "budget-entities",
  "budget-mappers",

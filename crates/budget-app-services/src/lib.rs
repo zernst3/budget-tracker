@@ -19,6 +19,7 @@ pub mod income;
 pub mod month_lifecycle;
 pub mod onboarding;
 pub mod plaid_sync;
+pub mod portfolio_review;
 pub mod portfolio_snapshot;
 pub mod triage;
 
@@ -38,5 +39,9 @@ pub use onboarding::{
     OnboardingService, opening_charge_id, opening_other_id,
 };
 pub use plaid_sync::PlaidSyncService;
+pub use portfolio_review::GeneratePortfolioReview;
+pub use portfolio_review::reconcile::{
+    MONEY_BAND, PERCENT_PRECISION_DP, ReconcileResult, reconcile,
+};
 pub use portfolio_snapshot::{assemble_snapshot, price_position};
 pub use triage::{PendingTransaction, Treatment, TriageInput, TriageOutcome, TriageService};
