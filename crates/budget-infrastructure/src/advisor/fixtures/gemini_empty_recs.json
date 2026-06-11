@@ -1,0 +1,18 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "{\"recommendations\":[]}"
+          }
+        ]
+      },
+      "finishReason": "STOP",
+      "usageMetadata": {
+        "promptTokenCount": 410,
+        "candidatesTokenCount": 4
+      }
+    }
+  ]
+}

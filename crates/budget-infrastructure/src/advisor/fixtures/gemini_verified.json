@@ -1,0 +1,18 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "{\"recommendations\":[{\"title\":\"Trim concentrated AAPL exposure\",\"rationale\":\"Your AAPL position is a large share of invested assets; consider trimming to reduce single-name concentration.\",\"confidence\":\"high\",\"claims\":[{\"subject\":{\"type\":\"position\",\"ticker\":\"AAPL\"},\"cited_value\":\"1800.00\",\"cited_percentage\":\"0.41\"}]},{\"title\":\"Emergency buffer is well funded\",\"rationale\":\"Your reserved cash buffer comfortably covers several months of expenses.\",\"confidence\":\"medium\",\"claims\":[{\"subject\":{\"type\":\"buffer\"},\"cited_value\":\"5000.00\"}]}]}"
+          }
+        ]
+      },
+      "finishReason": "STOP",
+      "usageMetadata": {
+        "promptTokenCount": 480,
+        "candidatesTokenCount": 96
+      }
+    }
+  ]
+}

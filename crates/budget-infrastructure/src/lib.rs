@@ -21,6 +21,7 @@
 //! gate, the Azure Key Vault secret-vault client
 //! (`BUDGET-PLAID-TOKEN-VAULT-1`), and the `webauthn_credentials` repository.
 
+pub mod advisor;
 pub mod auth;
 pub mod conn;
 pub mod error;
@@ -53,6 +54,13 @@ pub use portfolio_sources::{ManualCashBalanceSource, ManualPositionSource};
 // fixture-configured `MockMarketDataProvider` (the real HTTP adapter is an Open
 // Item, returns `Err` until a provider is confirmed).
 pub use market_data::{MockMarketDataProvider, MockQuote};
+
+// Investment-advisor adapters for AI Portfolio Insights (`§Phase 4`): the
+// fixture-driven `MockInvestmentAdvisor` parses captured Gemini JSON through the
+// same wire->domain path the real (Phase-6) adapter will. The Gemini wire DTOs +
+// `parse_advisor_response` stay `pub(crate)` (§0.3); the real `GeminiAdvisor` is
+// Phase 6.
+pub use advisor::{MOCK_MODEL_ID, MockInvestmentAdvisor, MockMode};
 
 // Plaid integration (build step 8, SPEC §6): the reqwest HTTP client + the
 // cursor-sync/reconcile engine. Both implement domain ports so the service layer

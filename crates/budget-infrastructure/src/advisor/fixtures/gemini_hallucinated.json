@@ -1,0 +1,18 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "{\"recommendations\":[{\"title\":\"Rebalance out of TSLA\",\"rationale\":\"Your Tesla holding has run up and now dominates the portfolio.\",\"confidence\":\"high\",\"claims\":[{\"subject\":{\"type\":\"position\",\"ticker\":\"TSLA\"},\"cited_value\":\"12000.00\"}]},{\"title\":\"Take AAPL gains off the table\",\"rationale\":\"Apple is your largest position by far.\",\"confidence\":\"high\",\"claims\":[{\"subject\":{\"type\":\"position\",\"ticker\":\"AAPL\"},\"cited_value\":\"50000.00\"}]},{\"title\":\"Shore up the emergency buffer\",\"rationale\":\"Your reserved buffer is thin relative to expenses.\",\"confidence\":\"medium\",\"claims\":[{\"subject\":{\"type\":\"buffer\"},\"cited_value\":\"3000.00\"}]}]}"
+          }
+        ]
+      },
+      "finishReason": "STOP",
+      "usageMetadata": {
+        "promptTokenCount": 502,
+        "candidatesTokenCount": 140
+      }
+    }
+  ]
+}
