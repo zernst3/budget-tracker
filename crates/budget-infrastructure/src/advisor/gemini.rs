@@ -231,6 +231,17 @@ impl GeminiAdvisor {
             ));
         }
 
+        // Phase 7: optional CONTEXT enrichment (Zach's resolved decision #2) —
+        // compact fundamentals + <=3 recent headlines per position, appended here
+        // as NON-CITABLE context (they are NOT reconciled and carry no
+        // `ClaimSubject` variant). Deliberately NOT built in Phase 6: it needs
+        // additional per-position network calls (Finnhub `/stock/profile2` +
+        // `/company-news`) that cannot be verified without a live key, and it must
+        // be hard-capped so it never bloats the prompt (which would also perturb
+        // `prompt_hash`). When added, fetch concurrently with the quote fan-out,
+        // cap to a fixed headline budget, and append a clearly-delimited
+        // `=== MARKET CONTEXT (not citable) ===` block after the snapshot.
+
         prompt
     }
 }

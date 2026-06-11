@@ -51,10 +51,15 @@ pub use uow::{SeaOrmUow, SeaOrmUowProvider};
 // grounds against.
 pub use portfolio_sources::{ManualCashBalanceSource, ManualPositionSource};
 
-// Market-data adapters for AI Portfolio Insights (`§Phase 3`): the
-// fixture-configured `MockMarketDataProvider` (the real HTTP adapter is an Open
-// Item, returns `Err` until a provider is confirmed).
-pub use market_data::{MockMarketDataProvider, MockQuote};
+// Market-data adapters for AI Portfolio Insights: the fixture-configured
+// `MockMarketDataProvider` (`§Phase 3`) and the real Phase-6 fallback chain
+// `ChainMarketDataProvider` (Finnhub -> Stooq -> manual -> None). The chain runs
+// with NO API key (Stooq + manual); the Finnhub key (vault secret
+// `FINNHUB_API_KEY_SECRET`) only upgrades to real-time quotes.
+pub use market_data::{
+    ChainMarketDataProvider, FINNHUB_API_KEY_SECRET, FinnhubMarketData, ManualPriceSource,
+    MockMarketDataProvider, MockQuote, StooqMarketData,
+};
 
 // Investment-advisor adapters for AI Portfolio Insights: the fixture-driven
 // `MockInvestmentAdvisor` (`§Phase 4`) and the real Gemini HTTP adapter
