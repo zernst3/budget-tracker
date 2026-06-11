@@ -1,0 +1,21 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "{\"recommendations\":[{\"title\":\"Trim concentrated AAPL position\",\"rationale\":\"AAPL is your single largest holding at a market value of $1800.00. Trimming it modestly would reduce single-name concentration risk while you still hold an unrealized gain.\",\"confidence\":\"high\",\"claims\":[{\"subject\":{\"type\":\"position\",\"ticker\":\"AAPL\"},\"cited_value\":\"1800.00\",\"cited_percentage\":\"1.0\"},{\"subject\":{\"type\":\"cost_basis_gain\",\"ticker\":\"AAPL\"},\"cited_value\":\"300.00\"}]}]}"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "usageMetadata": {
+        "promptTokenCount": 742,
+        "candidatesTokenCount": 118,
+        "totalTokenCount": 860
+      }
+    }
+  ]
+}

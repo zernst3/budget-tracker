@@ -22,6 +22,11 @@ budget-domain = { path = "../budget-domain" }
 budget-entities = { path = "../budget-entities" }
 budget-mappers = { path = "../budget-mappers" }
 
+# The Gemini advisor HTTP adapter (AI_FEATURE_DESIGN §Phase 6) hashes the
+# rendered prompt to `review_runs.prompt_hash` (sha256 -> hex string).
+sha2 = { workspace = true }
+hex = { workspace = true }
+
 # The schema Migrator (budget-migration::Migrator). The infrastructure crate is
 # the one place that connects to Postgres at startup, so it owns running pending
 # migrations (PROC-CI-MIGRATION-HYGIENE-1: the runner is idempotent).

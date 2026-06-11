@@ -56,12 +56,15 @@ pub use portfolio_sources::{ManualCashBalanceSource, ManualPositionSource};
 // Item, returns `Err` until a provider is confirmed).
 pub use market_data::{MockMarketDataProvider, MockQuote};
 
-// Investment-advisor adapters for AI Portfolio Insights (`§Phase 4`): the
-// fixture-driven `MockInvestmentAdvisor` parses captured Gemini JSON through the
-// same wire->domain path the real (Phase-6) adapter will. The Gemini wire DTOs +
-// `parse_advisor_response` stay `pub(crate)` (§0.3); the real `GeminiAdvisor` is
-// Phase 6.
-pub use advisor::{MOCK_MODEL_ID, MockInvestmentAdvisor, MockMode};
+// Investment-advisor adapters for AI Portfolio Insights: the fixture-driven
+// `MockInvestmentAdvisor` (`§Phase 4`) and the real Gemini HTTP adapter
+// `GeminiAdvisor` (`§Phase 6`) both parse through the same `pub(crate)`
+// wire->domain path (`parse_advisor_response`, §0.3). `GEMINI_API_KEY_SECRET` is
+// the vault secret name the real adapter reads the API key under
+// (`BUDGET-PLAID-TOKEN-VAULT-1`).
+pub use advisor::{
+    GEMINI_API_KEY_SECRET, GeminiAdvisor, MOCK_MODEL_ID, MockInvestmentAdvisor, MockMode,
+};
 
 // Plaid integration (build step 8, SPEC §6): the reqwest HTTP client + the
 // cursor-sync/reconcile engine. Both implement domain ports so the service layer
