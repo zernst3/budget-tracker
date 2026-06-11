@@ -25,6 +25,7 @@ pub mod funds;
 pub mod months;
 pub mod paycheck_config;
 pub mod plaid_items;
+pub mod review_runs;
 pub mod transactions;
 pub mod users;
 pub mod webauthn_credentials;

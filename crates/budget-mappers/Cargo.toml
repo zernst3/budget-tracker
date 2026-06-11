@@ -22,3 +22,10 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 rust_decimal = { workspace = true }
+
+# The review_runs mapper serde-round-trips the three JSONB payload columns
+# (snapshot / outcomes / recommendations) between SeaORM's `Json` and the domain
+# aggregate (`docs/AI_FEATURE_DESIGN.md §0.4`). serde derives already live on the
+# domain types; serde_json is the JSONB codec at this boundary.
+serde = { workspace = true }
+serde_json = { workspace = true }

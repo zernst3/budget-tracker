@@ -39,6 +39,7 @@ pub use repositories::funds::PostgresFundRepository;
 pub use repositories::months::PostgresMonthRepository;
 pub use repositories::paycheck_config::PostgresPaycheckConfigRepository;
 pub use repositories::plaid_items::PostgresPlaidItemRepository;
+pub use repositories::review_runs::PostgresReviewRunRepository;
 pub use repositories::transactions::PostgresTransactionRepository;
 pub use repositories::users::PostgresUserRepository;
 pub use repositories::webauthn_credentials::PostgresWebauthnCredentialRepository;
