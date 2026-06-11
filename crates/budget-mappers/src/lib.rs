@@ -34,11 +34,13 @@
 
 pub mod accounts;
 pub mod budgets;
+pub mod cash_balances;
 pub mod categories;
 pub mod funds;
 pub mod months;
 pub mod paycheck_config;
 pub mod plaid_items;
+pub mod positions;
 pub mod repayment_obligations;
 pub mod transactions;
 pub mod users;
