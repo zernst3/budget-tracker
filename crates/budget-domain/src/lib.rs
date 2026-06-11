@@ -73,8 +73,8 @@ pub use plaid_api::{
 pub use plaid_item::PlaidItem;
 pub use portfolio::{
     AdvisorError, AdvisorOutput, CashBalance, CashBalanceSource, Claim, ClaimSubject,
-    InvestmentAdvisor, MarketDataError, MarketDataProvider, NetWorth, Position, PositionSource,
-    PriceProvenance, PriceQuote, PricedPosition, PortfolioSnapshot, Recommendation, ReviewRun,
+    InvestmentAdvisor, MarketDataError, MarketDataProvider, NetWorth, PortfolioSnapshot, Position,
+    PositionSource, PriceProvenance, PriceQuote, PricedPosition, Recommendation, ReviewRun,
     ReviewTerminalState, Ticker, UnverifiedReason, ValidationOutcome,
 };
 pub use predicates::{

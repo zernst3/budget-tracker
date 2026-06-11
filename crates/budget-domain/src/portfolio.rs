@@ -576,7 +576,10 @@ mod tests {
     fn rejects_digits() {
         assert!(matches!(
             Ticker::try_new("AA1"),
-            Err(ValidationError::Format { field: "ticker", .. })
+            Err(ValidationError::Format {
+                field: "ticker",
+                ..
+            })
         ));
     }
 
@@ -584,7 +587,10 @@ mod tests {
     fn rejects_embedded_space() {
         assert!(matches!(
             Ticker::try_new("AA PL"),
-            Err(ValidationError::Format { field: "ticker", .. })
+            Err(ValidationError::Format {
+                field: "ticker",
+                ..
+            })
         ));
     }
 

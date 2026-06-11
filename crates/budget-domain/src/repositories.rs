@@ -21,11 +21,11 @@ use crate::budget::Budget;
 use crate::category::Category;
 use crate::error::RepositoryError;
 use crate::fund::Fund;
+use crate::ids::PositionId;
 use crate::ids::{
     AccountId, BudgetId, CategoryId, FundId, MonthId, PlaidItemId, RepaymentObligationId,
     TransactionId, UserId,
 };
-use crate::ids::PositionId;
 use crate::month::Month;
 use crate::paycheck_config::PaycheckConfig;
 use crate::plaid_item::PlaidItem;
@@ -612,8 +612,5 @@ pub trait CashBalanceRepository: CashBalanceSource {
     ///
     /// # Errors
     /// [`RepositoryError`] on any persistence failure.
-    async fn upsert(
-        &self,
-        balance: &crate::portfolio::CashBalance,
-    ) -> Result<(), RepositoryError>;
+    async fn upsert(&self, balance: &crate::portfolio::CashBalance) -> Result<(), RepositoryError>;
 }

@@ -334,7 +334,10 @@ mod tests {
             .split("CREATE TABLE IF NOT EXISTS review_runs")
             .nth(1)
             .unwrap_or("");
-        let review_runs_block = review_runs_ddl.split("review_runs (user_id").next().unwrap_or("");
+        let review_runs_block = review_runs_ddl
+            .split("review_runs (user_id")
+            .next()
+            .unwrap_or("");
         assert!(
             !review_runs_block.contains("updated_at"),
             "review_runs must NOT have an updated_at column (append-only, SQL-AUDIT-COLUMNS-1)"
@@ -348,8 +351,9 @@ mod tests {
     #[test]
     fn up_review_runs_fk_index_and_history_index() {
         assert!(
-            PORTFOLIO_INSIGHTS_UP_DDL
-                .contains("CREATE INDEX IF NOT EXISTS ix_review_runs_user_id ON review_runs (user_id)"),
+            PORTFOLIO_INSIGHTS_UP_DDL.contains(
+                "CREATE INDEX IF NOT EXISTS ix_review_runs_user_id ON review_runs (user_id)"
+            ),
             "review_runs.user_id FK column must be indexed (SQL-DB-INDEX-1)"
         );
         assert!(
@@ -369,7 +373,8 @@ mod tests {
         let review_runs = PORTFOLIO_INSIGHTS_DOWN_DDL.find("DROP TABLE IF EXISTS review_runs");
         let cash_balances = PORTFOLIO_INSIGHTS_DOWN_DDL.find("DROP TABLE IF EXISTS cash_balances");
         let positions = PORTFOLIO_INSIGHTS_DOWN_DDL.find("DROP TABLE IF EXISTS positions");
-        let enum_drop = PORTFOLIO_INSIGHTS_DOWN_DDL.find("DROP TYPE IF EXISTS review_terminal_state");
+        let enum_drop =
+            PORTFOLIO_INSIGHTS_DOWN_DDL.find("DROP TYPE IF EXISTS review_terminal_state");
         assert!(review_runs.is_some(), "down must drop review_runs");
         assert!(cash_balances.is_some(), "down must drop cash_balances");
         assert!(positions.is_some(), "down must drop positions");
