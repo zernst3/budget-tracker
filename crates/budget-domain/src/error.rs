@@ -101,4 +101,19 @@ pub enum DomainError {
     /// An operation was attempted in an illegal state (carries a description).
     #[error("illegal state: {0}")]
     IllegalState(String),
+    /// A month carrying actual income rows was about to roll over while the
+    /// income expectation was the unwired placeholder, which would commit a
+    /// rollover inflated by the full (un-subtracted) income amount
+    /// (`BUDGET-ROLLOVER-INTEGRITY-1`). Refuses rather than corrupt the rollover
+    /// chain (`SPIRIT-ROBUSTNESS-1`). Carries the offending month for diagnosis.
+    #[error(
+        "untrustworthy rollover: month {year}-{month:02} has actual income but the income \
+         expectation is the unwired stub; wire real income (B4) before committing a rollover"
+    )]
+    UntrustworthyIncomeRollover {
+        /// Calendar year of the offending prior month.
+        year: i32,
+        /// Calendar month (1–12) of the offending prior month.
+        month: i32,
+    },
 }

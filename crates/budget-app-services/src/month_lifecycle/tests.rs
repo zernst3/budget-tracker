@@ -44,7 +44,7 @@ use budget_domain::transaction::Transaction;
 use budget_domain::uow::{UnitOfWork, UowFuture, UowProvider};
 use budget_domain::{CategorySpent, MonthNet, RepositoryError};
 
-use crate::income::SemimonthlyFixedExpectation;
+use crate::income::{SemimonthlyFixedExpectation, UnwiredIncomeStub};
 
 use super::*;
 
@@ -624,6 +624,15 @@ fn ymd(y: i32, m: u32, d: u32) -> NaiveDate {
 /// Build a harness with one open-ended budget version + a rollover bucket and a
 /// $2,000 semimonthly expectation (so expected income = $4,000/month).
 fn harness() -> Harness {
+    harness_with_income(Arc::new(SemimonthlyFixedExpectation::new(Money::from_major(
+        2_000,
+    ))))
+}
+
+/// Build a harness with a caller-supplied income expectation, so the
+/// rollover-commit guard (`BUDGET-ROLLOVER-INTEGRITY-1`) can be exercised against
+/// an untrustworthy ([`UnwiredIncomeStub`]) expectation.
+fn harness_with_income(income: Arc<dyn crate::income::IncomeExpectation>) -> Harness {
     let months = Arc::new(FakeMonthRepo::new());
     let budgets = Arc::new(FakeBudgetRepo::new());
     let transactions = Arc::new(FakeTransactionRepo::new());
@@ -660,8 +669,6 @@ fn harness() -> Harness {
             sort_order: 0,
         });
     }
-
-    let income = Arc::new(SemimonthlyFixedExpectation::new(Money::from_major(2_000)));
 
     let service = MonthLifecycleService::new(
         Arc::clone(&months) as Arc<dyn MonthRepository>,
@@ -807,6 +814,117 @@ fn net_leftover_income_surplus_raises_other_by_formula() {
     );
     assert_eq!(with_expected, Money::ZERO);
     assert_eq!(with_surplus, Money::from_major(250));
+}
+
+// ---------------------------------------------------------------------------
+// Unwired-income rollover guard (DRIFT_REPORT MUST-FIX #1, option b):
+// BUDGET-ROLLOVER-INTEGRITY-1 / SPIRIT-ROBUSTNESS-1 / PROC-REGRESSION-TEST-1
+// ---------------------------------------------------------------------------
+
+/// Regression (`PROC-REGRESSION-TEST-1`): with the UNWIRED income stub and an
+/// actual income row in the prior month, the rollover-commit path must FAIL LOUD
+/// rather than commit an inflated rollover.
+///
+/// Pre-fix (no guard, zero-expectation stub): the `D5` formula
+/// `net = (actual_income - expected_income) + expense_remaining` would compute
+/// `(4000 - 0) + 0 = +$4,000` and COMMIT that as the Jan→Feb rollover — an
+/// inflated figure, since the $4,000 income was never offset by an expectation
+/// (`BUDGET-ROLLOVER-INTEGRITY-1` violation). Post-fix: `UnwiredIncomeStub`
+/// reports itself untrustworthy, so `prior_month_net` refuses with
+/// `DomainError::UntrustworthyIncomeRollover` and no rollover is committed.
+#[tokio::test]
+async fn rollover_refuses_when_income_exists_under_unwired_stub() {
+    let h = harness_with_income(Arc::new(UnwiredIncomeStub::new()));
+
+    // Jan 2026 with a single $4,000 actual income row and no expenses. Under the
+    // zero-expectation stub the pre-fix net would be a full +$4,000.
+    let jan = h
+        .service
+        .ensure_current_month(h.user_id, ny_noon(2026, 1, 10))
+        .await
+        .expect("init jan");
+
+    let mut income = base_txn(&h, jan.id, Money::from_major(4_000));
+    income.income_kind = Some(IncomeKind::Budgeted);
+    push_txn(&h, income);
+
+    // Advancing to Feb drives the Jan->Feb rollover commit. The guard must fire.
+    let err = h
+        .service
+        .ensure_current_month(h.user_id, ny_noon(2026, 2, 10))
+        .await
+        .expect_err("rollover must refuse under the unwired income stub when income exists");
+
+    assert_eq!(
+        err,
+        DomainError::UntrustworthyIncomeRollover {
+            year: 2026,
+            month: 1,
+        },
+        "the guard names the offending prior month and refuses the commit"
+    );
+
+    // And no Feb rollover row was committed from the inflated figure.
+    if let Some(feb) = h
+        .months
+        .find_by_year_month(h.user_id, 2026, 2)
+        .await
+        .expect("feb lookup")
+    {
+        let rollover = h
+            .transactions
+            .find_rollover_for_month(feb.id)
+            .await
+            .expect("rollover lookup");
+        assert!(
+            rollover.is_none(),
+            "no inflated rollover may be committed once the guard fires"
+        );
+    }
+}
+
+/// Companion: the SAME unwired stub does NOT block a month with zero income
+/// rows. The guard keys off the presence of actual income, not merely the
+/// untrustworthy expectation, so the read-only month view keeps working today
+/// (no production path writes income rows yet).
+#[tokio::test]
+async fn rollover_proceeds_under_unwired_stub_when_no_income_rows() {
+    let h = harness_with_income(Arc::new(UnwiredIncomeStub::new()));
+    let exp_cat = add_expense_category(&h, "Groceries");
+
+    let jan = h
+        .service
+        .ensure_current_month(h.user_id, ny_noon(2026, 1, 10))
+        .await
+        .expect("init jan");
+
+    // A plain -$100 expense, no income row at all.
+    let mut expense = base_txn(&h, jan.id, Money::from_major(-100));
+    expense.category_id = Some(exp_cat);
+    push_txn(&h, expense);
+
+    h.service
+        .ensure_current_month(h.user_id, ny_noon(2026, 2, 10))
+        .await
+        .expect("rollover proceeds when no income row exists");
+
+    let feb = h
+        .months
+        .find_by_year_month(h.user_id, 2026, 2)
+        .await
+        .expect("feb lookup")
+        .expect("feb exists");
+    let rollover = h
+        .transactions
+        .find_rollover_for_month(feb.id)
+        .await
+        .expect("rollover lookup")
+        .expect("rollover exists");
+    assert_eq!(
+        rollover.amount,
+        Money::from_major(-100),
+        "with no income row the net is just the expense remaining (no income term)"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -98,6 +98,25 @@ pub trait IncomeExpectation: Send + Sync {
     /// Returns a signed [`Money`] in the internal convention (income is
     /// positive).
     fn expected_income(&self, user: UserId, year: i32, month: i32) -> Money;
+
+    /// Whether this expectation is wired to a real income source and may
+    /// therefore be safely subtracted from `actual_income` in the `D5` rollover
+    /// formula (`BUDGET-ROLLOVER-INTEGRITY-1`).
+    ///
+    /// Defaults to `true`: a real `SemimonthlyFixedExpectation`,
+    /// `FixedExpectation`, or `ConfigDrivenIncomeExpectation` is always
+    /// trustworthy — its zero (the hourly/variable degradation, `SPEC §4.8`) is
+    /// a *correct* expectation, not an absence of one.
+    ///
+    /// The one exception is [`UnwiredIncomeStub`], the placeholder wired into the
+    /// read-only month view before real income wiring (`B4`) lands. It overrides
+    /// this to `false` so the month-lifecycle rollover-commit path can FAIL LOUD
+    /// (`SPIRIT-ROBUSTNESS-1`) rather than commit a rollover inflated by the full
+    /// (un-subtracted) income amount the moment a real income row appears. See
+    /// [`crate::month_lifecycle::MonthLifecycleService::prior_month_net`].
+    fn is_trustworthy(&self) -> bool {
+        true
+    }
 }
 
 /// The number of semimonthly paychecks in any month — always two (`SPEC §4.8`).
@@ -325,6 +344,47 @@ impl FixedExpectation {
 impl IncomeExpectation for FixedExpectation {
     fn expected_income(&self, _user: UserId, _year: i32, _month: i32) -> Money {
         self.value
+    }
+}
+
+/// The UNWIRED income placeholder (`SPEC §4.8`, `B4`).
+///
+/// Wired into the read-only month view (`budget-ui` `MonthViewState`) before the
+/// real config-driven income engine ([`ConfigDrivenIncomeExpectation`]) is
+/// connected. It returns [`Money::ZERO`] expected income for every month — but,
+/// unlike [`FixedExpectation::zero`] (the *legitimate* hourly/variable
+/// degradation), it reports [`IncomeExpectation::is_trustworthy`] as `false`.
+///
+/// The distinction is load-bearing (`SPIRIT-ROBUSTNESS-1`, named threat = a
+/// corrupted rollover chain): with a zero expectation, the `D5` formula
+/// `net = (actual_income - expected_income) + expense_remaining` rolls a month
+/// forward inflated by the *entire* income amount the moment any actual income
+/// row exists (`BUDGET-ROLLOVER-INTEGRITY-1`). While the seam is unwired, no
+/// production path writes an income row, so the figure is correct *today*; this
+/// stub makes the unsafety explicit so the rollover-commit path can FAIL LOUD if
+/// that assumption is ever violated, instead of silently committing a wrong
+/// rollover. Replace it with [`ConfigDrivenIncomeExpectation`] (`B4`) before any
+/// income row is written.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnwiredIncomeStub;
+
+impl UnwiredIncomeStub {
+    /// Construct the unwired placeholder.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl IncomeExpectation for UnwiredIncomeStub {
+    fn expected_income(&self, _user: UserId, _year: i32, _month: i32) -> Money {
+        Money::ZERO
+    }
+
+    /// Always `false`: this placeholder is NOT a real income source, so its zero
+    /// must never be silently subtracted in a committed rollover.
+    fn is_trustworthy(&self) -> bool {
+        false
     }
 }
 

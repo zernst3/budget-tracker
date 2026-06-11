@@ -173,12 +173,18 @@ impl MonthViewState {
     /// dedicated connection (required to open write transactions for
     /// `ensure_current_month`).
     ///
-    /// The `income` expectation is wired as a zero-expectation
-    /// (`SemimonthlyFixedExpectation::new(Money::ZERO)`) for B4: the month view is
-    /// read-only and the income seam only affects `month_net_for` (used by
-    /// `ensure_month`'s rollover computation). A full
-    /// `ConfigDrivenIncomeExpectation` can replace this in a later phase once the
-    /// `paycheck_config` is seeded.
+    /// The `income` expectation is the UNWIRED placeholder
+    /// (`UnwiredIncomeStub`) until real income wiring (B4) lands. This seam is
+    /// **UNSAFE once an actual income row exists**: the `D5` rollover formula
+    /// `net = (actual_income - expected_income) + expense_remaining` would, with a
+    /// zero expectation, roll a month forward inflated by the full income amount
+    /// (`BUDGET-ROLLOVER-INTEGRITY-1`). It is correct *today* only because no
+    /// production path writes an income row yet; `UnwiredIncomeStub` reports
+    /// itself untrustworthy so `MonthLifecycleService::prior_month_net` FAILS LOUD
+    /// (`DomainError::UntrustworthyIncomeRollover`, `SPIRIT-ROBUSTNESS-1`) rather
+    /// than commit a wrong rollover if that assumption is ever violated. The
+    /// prerequisite before income rows are trustworthy is wiring real
+    /// `ConfigDrivenIncomeExpectation` (B4) from the persisted `paycheck_config`.
     pub fn new(
         months: Arc<dyn MonthRepository>,
         budgets: Arc<dyn BudgetRepository>,
@@ -206,9 +212,7 @@ impl MonthViewState {
         funds_db: DatabaseConnection,
         uow_db: DatabaseConnection,
     ) -> Self {
-        use budget_app_services::{
-            IncomeExpectation, MonthLifecycleService, SemimonthlyFixedExpectation,
-        };
+        use budget_app_services::{IncomeExpectation, MonthLifecycleService, UnwiredIncomeStub};
         use budget_domain::repositories::FundRepository;
         use budget_domain::uow::UowProvider;
         use budget_infrastructure::{PostgresFundRepository, SeaOrmUowProvider};
@@ -220,10 +224,10 @@ impl MonthViewState {
             Arc::new(PostgresTransactionRepository::new(transactions_db));
         let funds: Arc<dyn FundRepository> = Arc::new(PostgresFundRepository::new(funds_db));
 
-        // Zero-expectation income seam for B4/ledger (read-only view, see doc above).
-        let income: Arc<dyn IncomeExpectation> = Arc::new(SemimonthlyFixedExpectation::new(
-            budget_domain::money::Money::ZERO,
-        ));
+        // Unwired income seam for B4/ledger (read-only view, see doc above). This
+        // placeholder reports itself untrustworthy so a committed rollover can
+        // never silently inflate by an un-subtracted income amount.
+        let income: Arc<dyn IncomeExpectation> = Arc::new(UnwiredIncomeStub::new());
 
         let uow: Arc<dyn UowProvider> = Arc::new(SeaOrmUowProvider::new(uow_db));
 

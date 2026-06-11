@@ -29,7 +29,7 @@ pub use expected_expense::ExpectedExpenseService;
 pub use fund::{BufferHealth, FundService, LargePurchaseResolution};
 pub use income::{
     ConfigDrivenIncomeExpectation, FixedExpectation, IncomeExpectation, IncomeSurplusRouter,
-    IncomeSurplusRouting, SemimonthlyFixedExpectation,
+    IncomeSurplusRouting, SemimonthlyFixedExpectation, UnwiredIncomeStub,
 };
 pub use month_lifecycle::{MonthLifecycleService, net_leftover};
 pub use onboarding::{

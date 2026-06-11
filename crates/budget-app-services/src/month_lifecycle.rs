@@ -368,6 +368,27 @@ impl MonthLifecycleService {
             return Ok(Money::ZERO);
         }
 
+        // BUDGET-ROLLOVER-INTEGRITY-1 / SPIRIT-ROBUSTNESS-1 guard (B4 seam,
+        // DRIFT_REPORT MUST-FIX #1, option b): the rolled-forward figure feeds a
+        // COMMITTED rollover row. The D5 formula subtracts `expected_income` from
+        // `actual_income`; while the income expectation is the unwired placeholder
+        // (`UnwiredIncomeStub`, expected_income == 0), any actual income row would
+        // roll forward inflated by the full income amount. No production path
+        // writes an income row today, so this never fires in the current phase —
+        // but if one ever does before real income wiring (B4) lands, refuse loudly
+        // rather than commit a wrong rollover. `month_net_for` itself is NOT
+        // guarded: it is also a pure read used by deficit-financing detection, and
+        // a read of an inflated figure is recoverable; a committed rollover is not.
+        if !self.income.is_trustworthy() {
+            let prior_txns = self.transactions.list_for_month(prior.id).await?;
+            if !actual_income_sum(&prior_txns).is_zero() {
+                return Err(DomainError::UntrustworthyIncomeRollover {
+                    year: prior.year,
+                    month: prior.month,
+                });
+            }
+        }
+
         self.month_net_for(&prior).await
     }
 
