@@ -44,7 +44,7 @@ pub mod server_state;
 
 use dioxus::prelude::*;
 
-use views::{LedgerView, Login, PendingView};
+use views::{LedgerView, Login, PendingView, PortfolioReviewView};
 
 /// The application route table.
 ///
@@ -65,6 +65,12 @@ pub enum Route {
     /// comment + one of the three `SPEC §4.9` treatments.
     #[route("/pending")]
     PendingView {},
+    /// The authenticated AI Portfolio Insights screen
+    /// (`docs/AI_FEATURE_DESIGN.md §Phase 2`): read-only holdings + cash
+    /// balances + the reserved-buffer subtotal. Priced snapshot + review insights
+    /// land in later phases.
+    #[route("/portfolio")]
+    PortfolioReviewView {},
 }
 
 /// The root application component, shared by the server (SSR) and web (hydrate)

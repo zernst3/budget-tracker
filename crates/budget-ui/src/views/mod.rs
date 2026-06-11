@@ -4,7 +4,9 @@
 mod ledger;
 mod login;
 mod pending;
+mod portfolio_review;
 
 pub use ledger::LedgerView;
 pub use login::Login;
 pub use pending::PendingView;
+pub use portfolio_review::PortfolioReviewView;

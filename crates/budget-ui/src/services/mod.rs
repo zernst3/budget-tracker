@@ -20,6 +20,7 @@ pub mod ledger;
 pub mod ledger_edit;
 pub mod month_view;
 pub mod passkey;
+pub mod portfolio_review;
 pub mod triage;
 
 // The AuthedUser gate (`BUDGET-AUTH-GATE-1`) is server-only: it extracts the
@@ -39,6 +40,12 @@ pub use month_view::ensure_month;
 pub use passkey::{
     finish_passkey_authentication, finish_passkey_registration, start_passkey_authentication,
     start_passkey_registration,
+};
+pub use portfolio_review::{
+    AddPositionDto, CashBalanceDto, ClaimDto, NetWorthDto, PORTFOLIO_REVIEW_DISCLAIMER,
+    PortfolioSnapshotDto, PositionDto, PricedPositionDto, RecommendationDto, ReviewResultDto,
+    ReviewTerminalStateDto, ValidationBadgeDto, add_position, delete_position, edit_position,
+    list_cash_balances, list_positions, portfolio_snapshot, run_review, upsert_cash_balance,
 };
 pub use triage::{
     FundDto, PendingRowDto, PullResultDto, TreatmentDto, TriageRequestDto, TriageResultDto,

@@ -25,6 +25,7 @@ pub mod auth;
 pub mod conn;
 pub mod error;
 pub mod plaid;
+pub mod portfolio_sources;
 pub mod repositories;
 pub mod uow;
 pub mod upsert;
@@ -40,6 +41,12 @@ pub use repositories::transactions::PostgresTransactionRepository;
 pub use repositories::users::PostgresUserRepository;
 pub use repositories::webauthn_credentials::PostgresWebauthnCredentialRepository;
 pub use uow::{SeaOrmUow, SeaOrmUowProvider};
+
+// Manual (user-entered) portfolio sources for AI Portfolio Insights
+// (`docs/AI_FEATURE_DESIGN.md §Phase 2`): the `Position`/`CashBalance`
+// persistence adapters the positions UI mutates through and the review use-case
+// grounds against.
+pub use portfolio_sources::{ManualCashBalanceSource, ManualPositionSource};
 
 // Plaid integration (build step 8, SPEC §6): the reqwest HTTP client + the
 // cursor-sync/reconcile engine. Both implement domain ports so the service layer

@@ -504,3 +504,62 @@ impl TriageState {
         Ok(state)
     }
 }
+
+// ---------------------------------------------------------------------------
+// PortfolioState — server state for the AI Portfolio Insights server functions
+// ---------------------------------------------------------------------------
+
+/// Server state for the AI Portfolio Insights server functions
+/// (`docs/AI_FEATURE_DESIGN.md §Phase 2`).
+///
+/// Holds the manual position/cash-balance persistence adapters the positions UI
+/// reads/writes through. The `market` provider (Phase 3) and the
+/// `GeneratePortfolioReview` use-case (Phase 5) fields are added in their
+/// respective phases — the struct is grown incrementally so each phase's
+/// green-gate holds without forward-referencing types that do not exist yet. The
+/// `from_connections` real/mock wiring lands in Phase 6 (`AI_MODE=mock`,
+/// mirroring `PLAID_MODE=mock`); until then the state is assembled directly by
+/// tests / the server edge.
+///
+/// `Arc`-backed so cloning into the Axum `Extension` is cheap.
+#[derive(Clone)]
+pub struct PortfolioState {
+    /// The manual positions read/write adapter (`PositionRepository`).
+    pub position_source: Arc<dyn budget_domain::repositories::PositionRepository>,
+    /// The manual cash-balances read/write adapter (`CashBalanceRepository`),
+    /// bound to the single app user (`SPEC §9`; see `ManualCashBalanceSource`).
+    pub balance_source: Arc<dyn budget_domain::repositories::CashBalanceRepository>,
+}
+
+impl PortfolioState {
+    /// Assemble from collaborators (used directly by tests + the server edge
+    /// until the Phase-6 `from_connections` wiring lands).
+    #[must_use]
+    pub fn new(
+        position_source: Arc<dyn budget_domain::repositories::PositionRepository>,
+        balance_source: Arc<dyn budget_domain::repositories::CashBalanceRepository>,
+    ) -> Self {
+        Self {
+            position_source,
+            balance_source,
+        }
+    }
+
+    /// Extract the `PortfolioState` from the current server-function request.
+    ///
+    /// # Errors
+    /// Returns a `500` if the extension is absent (wiring fault in `main.rs`).
+    pub async fn extract() -> Result<Self, dioxus::prelude::ServerFnError> {
+        use dioxus::fullstack::FullstackContext;
+        use dioxus::fullstack::axum::Extension;
+
+        let Extension(state) = FullstackContext::extract::<Extension<Self>, _>()
+            .await
+            .map_err(|_| dioxus::prelude::ServerFnError::ServerError {
+                message: "portfolio state unavailable (wiring fault)".to_owned(),
+                code: 500,
+                details: None,
+            })?;
+        Ok(state)
+    }
+}
