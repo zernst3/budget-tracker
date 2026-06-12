@@ -21,6 +21,8 @@
 //! [`SeaOrmUow`]: crate::uow::SeaOrmUow
 
 pub mod budgets;
+pub mod dividend_events;
+pub mod drip_applications;
 pub mod funds;
 pub mod months;
 pub mod paycheck_config;

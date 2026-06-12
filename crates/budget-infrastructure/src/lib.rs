@@ -24,6 +24,7 @@
 pub mod advisor;
 pub mod auth;
 pub mod conn;
+pub mod dividend_sources;
 pub mod error;
 pub mod market_data;
 pub mod plaid;
@@ -35,6 +36,8 @@ pub mod upsert;
 // Re-export the concrete repository impls + the unit-of-work primitive at the
 // crate root so the application edge wires them without deep paths.
 pub use repositories::budgets::PostgresBudgetRepository;
+pub use repositories::dividend_events::PostgresDividendEventCache;
+pub use repositories::drip_applications::PostgresDripApplicationRepository;
 pub use repositories::funds::PostgresFundRepository;
 pub use repositories::months::PostgresMonthRepository;
 pub use repositories::paycheck_config::PostgresPaycheckConfigRepository;
@@ -59,6 +62,16 @@ pub use portfolio_sources::{ManualCashBalanceSource, ManualPositionSource};
 pub use market_data::{
     ChainMarketDataProvider, FINNHUB_API_KEY_SECRET, FinnhubMarketData, ManualPriceSource,
     MockMarketDataProvider, MockQuote, StooqMarketData,
+};
+
+// Dividend-data adapters for DRIP & real-time tracking (`§Phase 7`): the
+// fixture-driven `MockDividendSource` + the real chain `ChainDividendSource`
+// (Tiingo -> Yahoo -> manual). The chain runs with NO API key (Yahoo keyless +
+// manual); the Tiingo key (vault secret `TIINGO_API_KEY_SECRET`) upgrades to the
+// primary source.
+pub use dividend_sources::{
+    ChainDividendSource, ManualDividendSource, MockDividendSource, TIINGO_API_KEY_SECRET,
+    TiingoDividendSource, YahooDividendSource,
 };
 
 // Investment-advisor adapters for AI Portfolio Insights: the fixture-driven
