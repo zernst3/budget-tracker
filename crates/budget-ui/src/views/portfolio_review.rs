@@ -38,9 +38,10 @@ use crate::Route;
 use crate::components::NavBar;
 use crate::services::logout;
 use crate::services::portfolio_review::{
-    CashBalanceDto, PositionDto, PricedPositionDto, RecommendationDto, ReviewResultDto,
-    ReviewTerminalStateDto, ValidationBadgeDto, list_cash_balances, list_models, list_positions,
-    portfolio_snapshot, run_review,
+    AccountUploadDto, CashBalanceDto, PositionDto, PricedPositionDto, RecommendationDto,
+    ReviewResultDto, ReviewTerminalStateDto, UploadedPositionDto, ValidationBadgeDto,
+    list_cash_balances, list_models, list_positions, portfolio_snapshot, run_review,
+    set_drip_enabled, upload_account_positions,
 };
 
 /// The Portfolio Insights page (Phase 2 holdings/cash + Phase 6 AI review).
@@ -70,8 +71,15 @@ pub fn PortfolioReviewView() -> Element {
                 {match &*positions.read() {
                     None => rsx! { p { class: "loading-text", "Loading holdings…" } },
                     Some(Err(_)) => rsx! { p { class: "error-text", "Could not load holdings." } },
-                    Some(Ok(rows)) => rsx! { PositionsTable { rows: rows.clone() } },
+                    Some(Ok(rows)) => rsx! { PositionsByAccount { rows: rows.clone(), positions } },
                 }}
+            }
+
+            // Lean per-account upload affordance (§2.7/§6): paste an account's
+            // holdings and reconcile that account only.
+            section { class: "portfolio-upload",
+                h2 { "Upload an account" }
+                UploadAccountForm { positions }
             }
 
             section { class: "portfolio-cash",
@@ -407,37 +415,233 @@ fn PricedPositionsTable(rows: Vec<PricedPositionDto>) -> Element {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2: read-only holdings table + cash panel (unchanged)
+// Phase 7.4: holdings GROUPED BY ACCOUNT, each row a DRIP toggle (§2.7)
 // ---------------------------------------------------------------------------
 
-/// The read-only holdings table.
+/// Group the positions by `account_label`, preserving stable order (accounts in
+/// first-seen order; rows within an account in load order). Pure so it is
+/// unit-tested directly (`ORCH-NEW-PATH-TESTS-1`).
+#[must_use]
+fn group_by_account(rows: &[PositionDto]) -> Vec<(String, Vec<PositionDto>)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, Vec<PositionDto>> =
+        std::collections::HashMap::new();
+    for p in rows {
+        if !groups.contains_key(&p.account_label) {
+            order.push(p.account_label.clone());
+        }
+        groups
+            .entry(p.account_label.clone())
+            .or_default()
+            .push(p.clone());
+    }
+    order
+        .into_iter()
+        .map(|label| {
+            let rows = groups.remove(&label).unwrap_or_default();
+            (label, rows)
+        })
+        .collect()
+}
+
+/// The holdings, GROUPED BY ACCOUNT. Each row carries a DRIP checkbox that
+/// toggles `drip_enabled` inline (`set_drip_enabled`) and persists; on success the
+/// `positions` resource is restarted so the table reflects the new state
+/// (`RUST-DIOXUS-6`/`RUST-DIOXUS-8`: keyed rows).
 #[component]
-fn PositionsTable(rows: Vec<PositionDto>) -> Element {
+fn PositionsByAccount(
+    rows: Vec<PositionDto>,
+    positions: Resource<Result<Vec<PositionDto>, ServerFnError>>,
+) -> Element {
     if rows.is_empty() {
         return rsx! { p { class: "empty-text", "No holdings entered yet." } };
     }
+    let grouped = group_by_account(&rows);
     rsx! {
-        table { class: "positions-table",
-            thead {
-                tr {
-                    th { "Ticker" }
-                    th { "Account" }
-                    th { "Type" }
-                    th { "Shares" }
-                    th { "Cost basis" }
-                }
-            }
-            tbody {
-                for p in rows {
-                    tr { key: "{p.id}",
-                        td { "{p.ticker}" }
-                        td { "{p.account_label}" }
-                        td { "{p.account_type}" }
-                        td { "{p.shares}" }
-                        td { {p.cost_basis.clone().unwrap_or_else(|| "—".to_owned())} }
+        div { class: "positions-by-account",
+            for (account , account_rows) in grouped {
+                section { key: "{account}", class: "account-group",
+                    h3 { class: "account-group-header", "{account}" }
+                    table { class: "positions-table",
+                        thead {
+                            tr {
+                                th { "Ticker" }
+                                th { "Type" }
+                                th { "Shares" }
+                                th { "Cost basis" }
+                                th { "DRIP" }
+                            }
+                        }
+                        tbody {
+                            for p in account_rows {
+                                PositionRow { key: "{p.id}", position: p.clone(), positions }
+                            }
+                        }
                     }
                 }
             }
+        }
+    }
+}
+
+/// One holdings row with an inline DRIP checkbox (`§2.7`). Toggling calls the
+/// gated `set_drip_enabled` server fn; on success the parent `positions` resource
+/// is restarted so the persisted state re-renders. The checkbox is disabled while
+/// the toggle is in flight (debounce).
+#[component]
+fn PositionRow(
+    position: PositionDto,
+    positions: Resource<Result<Vec<PositionDto>, ServerFnError>>,
+) -> Element {
+    let mut saving = use_signal(|| false);
+    let id = position.id;
+    let on_toggle = move |evt: Event<FormData>| {
+        if *saving.read() {
+            return;
+        }
+        let enabled = evt.checked();
+        saving.set(true);
+        spawn(async move {
+            let _ = set_drip_enabled(id, enabled).await;
+            // Re-read so the table reflects the persisted state (survives uploads).
+            positions.restart();
+            saving.set(false);
+        });
+    };
+    rsx! {
+        tr {
+            td { "{position.ticker}" }
+            td { "{position.account_type}" }
+            td { "{position.shares}" }
+            td { {position.cost_basis.clone().unwrap_or_else(|| "—".to_owned())} }
+            td {
+                input {
+                    r#type: "checkbox",
+                    checked: position.drip_enabled,
+                    disabled: *saving.read(),
+                    onchange: on_toggle,
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7.4: the lean per-account upload affordance (§2.7/§6)
+// ---------------------------------------------------------------------------
+
+/// Parse pasted CSV-ish upload text into `UploadedPositionDto`s. Each non-blank
+/// line is `TICKER, SHARES[, COST_BASIS]`. Pure so it is unit-tested directly
+/// (`ORCH-NEW-PATH-TESTS-1`); validation of ticker/shares happens server-side via
+/// the domain newtypes (`RUST-DIOXUS-13`).
+#[must_use]
+fn parse_upload_text(text: &str) -> Vec<UploadedPositionDto> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter_map(|line| {
+            let mut cols = line.split(',').map(str::trim);
+            let ticker = cols.next().filter(|t| !t.is_empty())?.to_owned();
+            let shares = cols.next().filter(|s| !s.is_empty())?.to_owned();
+            let cost_basis = cols.next().map(ToOwned::to_owned).filter(|s| !s.is_empty());
+            Some(UploadedPositionDto {
+                ticker,
+                shares,
+                cost_basis,
+            })
+        })
+        .collect()
+}
+
+/// A lean upload form: pick an account label + type, paste the holdings, submit a
+/// PER-ACCOUNT upsert (`upload_account_positions`). On success the `positions`
+/// resource is restarted so the grouped table reflects the reconcile.
+#[component]
+fn UploadAccountForm(positions: Resource<Result<Vec<PositionDto>, ServerFnError>>) -> Element {
+    let mut account_label = use_signal(String::new);
+    let mut account_type = use_signal(|| "investment".to_owned());
+    let mut paste = use_signal(String::new);
+    let mut submitting = use_signal(|| false);
+    let mut message = use_signal(|| None::<Result<String, String>>);
+
+    let on_submit = move |_| {
+        if *submitting.read() {
+            return;
+        }
+        let label = account_label.read().trim().to_owned();
+        if label.is_empty() {
+            message.set(Some(Err("Enter an account label first.".to_owned())));
+            return;
+        }
+        let parsed = parse_upload_text(&paste.read());
+        let payload = AccountUploadDto {
+            account_label: label,
+            account_type: account_type.read().clone(),
+            positions: parsed,
+        };
+        submitting.set(true);
+        spawn(async move {
+            match upload_account_positions(payload).await {
+                Ok(rows) => {
+                    message.set(Some(Ok(format!(
+                        "Uploaded — {} holding(s) now in the portfolio.",
+                        rows.len()
+                    ))));
+                    positions.restart();
+                }
+                Err(e) => message.set(Some(Err(e.to_string()))),
+            }
+            submitting.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "upload-account-form",
+            p { class: "upload-help",
+                "Paste one holding per line as " code { "TICKER, SHARES" }
+                " (optional third column for cost basis). The upload replaces the chosen account's holdings only; DRIP toggles on surviving positions are kept."
+            }
+            div { class: "upload-controls",
+                label { r#for: "upload-account-label", "Account: " }
+                input {
+                    id: "upload-account-label",
+                    r#type: "text",
+                    placeholder: "Brokerage",
+                    value: "{account_label}",
+                    disabled: *submitting.read(),
+                    oninput: move |e| account_label.set(e.value()),
+                }
+                label { r#for: "upload-account-type", "Type: " }
+                select {
+                    id: "upload-account-type",
+                    value: "{account_type}",
+                    disabled: *submitting.read(),
+                    onchange: move |e| account_type.set(e.value()),
+                    option { value: "investment", "investment" }
+                    option { value: "savings", "savings" }
+                    option { value: "checking", "checking" }
+                    option { value: "other", "other" }
+                }
+            }
+            textarea {
+                class: "upload-textarea",
+                rows: "5",
+                placeholder: "AAPL, 10\nMSFT, 5, 1500.00",
+                value: "{paste}",
+                disabled: *submitting.read(),
+                oninput: move |e| paste.set(e.value()),
+            }
+            button {
+                class: "upload-submit-button",
+                disabled: *submitting.read(),
+                onclick: on_submit,
+                {if *submitting.read() { "Uploading…" } else { "Upload account" }}
+            }
+            {match &*message.read() {
+                None => rsx! {},
+                Some(Ok(ok)) => rsx! { p { class: "upload-ok", "{ok}" } },
+                Some(Err(err)) => rsx! { p { class: "error-text", "Upload failed: {err}" } },
+            }}
         }
     }
 }
@@ -563,5 +767,58 @@ mod tests {
             row.estimated_badge,
             "estimated · 2 dividends reinvested since last upload"
         );
+    }
+
+    // -- Phase 7.4: account grouping + upload parsing -------------------------
+
+    fn position_dto(ticker: &str, account: &str, drip: bool) -> PositionDto {
+        PositionDto {
+            id: uuid::Uuid::new_v4(),
+            ticker: ticker.to_owned(),
+            account_label: account.to_owned(),
+            account_type: "investment".to_owned(),
+            shares: "10".to_owned(),
+            cost_basis: None,
+            drip_enabled: drip,
+        }
+    }
+
+    #[test]
+    fn group_by_account_groups_and_preserves_first_seen_order() {
+        let rows = vec![
+            position_dto("AAPL", "Brokerage", false),
+            position_dto("VTI", "Roth", true),
+            position_dto("MSFT", "Brokerage", false),
+        ];
+        let grouped = group_by_account(&rows);
+        assert_eq!(grouped.len(), 2);
+        // Brokerage seen first, then Roth.
+        assert_eq!(grouped[0].0, "Brokerage");
+        assert_eq!(grouped[0].1.len(), 2, "AAPL + MSFT under Brokerage");
+        assert_eq!(grouped[1].0, "Roth");
+        assert_eq!(grouped[1].1.len(), 1);
+        assert!(grouped[1].1[0].drip_enabled, "Roth VTI drip flag carried");
+    }
+
+    #[test]
+    fn parse_upload_text_reads_ticker_shares_and_optional_cost_basis() {
+        let text = "AAPL, 10\nMSFT, 5, 1500.00\n\n  NVDA ,3 \n";
+        let parsed = parse_upload_text(text);
+        assert_eq!(parsed.len(), 3, "blank lines skipped");
+        assert_eq!(parsed[0].ticker, "AAPL");
+        assert_eq!(parsed[0].shares, "10");
+        assert_eq!(parsed[0].cost_basis, None);
+        assert_eq!(parsed[1].cost_basis, Some("1500.00".to_owned()));
+        // Whitespace trimmed per column.
+        assert_eq!(parsed[2].ticker, "NVDA");
+        assert_eq!(parsed[2].shares, "3");
+    }
+
+    #[test]
+    fn parse_upload_text_skips_lines_missing_shares() {
+        // A ticker with no shares column is not a valid holding line.
+        let parsed = parse_upload_text("AAPL\nMSFT, 5");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].ticker, "MSFT");
     }
 }
