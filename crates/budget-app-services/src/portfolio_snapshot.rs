@@ -43,6 +43,9 @@ use budget_domain::portfolio::{
     PriceQuote, PricedPosition, ShareProvenance,
 };
 
+use crate::error::ServiceError;
+use crate::portfolio_drip::DripCatchUpService;
+
 /// Resolve quotes for `positions` concurrently and assemble the grounding
 /// [`PortfolioSnapshot`] (`ARCH-PARALLEL-INDEPENDENT-1`).
 ///
@@ -66,15 +69,89 @@ pub async fn assemble_snapshot(
     }))
     .await?;
 
+    // v1 net worth is assets-only (`§Open Items 3` resolved): liabilities = ZERO,
+    // a reserved flag, not an assumption — handled in `assemble_from_priced`.
+    Ok(assemble_from_priced(user_id, priced, cash_balances, now))
+}
+
+/// Assemble the grounding snapshot, FIRST lazily applying any new DRIP
+/// dividends per position via the idempotent catch-up engine, then pricing the
+/// estimated current shares (`docs/DRIP_REALTIME_DESIGN.md §6`, P7.4 wire-in).
+///
+/// For each position: run [`DripCatchUpService::catch_up_position`] (apply every
+/// unprocessed `(position, pay-date)` exactly once, in date order, under the
+/// `(position_id, pay_date)` unique guard — `BUDGET-IDEMPOTENT-MONTH-INIT-1`),
+/// then replace the position's `shares` with the engine's estimated CURRENT count
+/// (`baseline + Σ accretion`, `BUDGET-ROLLOVER-INTEGRITY-1`) and carry its
+/// [`ShareProvenance`] label onto the [`PricedPosition`] so nothing estimated
+/// renders as confirmed (`BUDGET-AI-1`, §2.5/§8). Catch-up runs concurrently per
+/// position (`ARCH-PARALLEL-INDEPENDENT-1`); the quote fan-out then proceeds
+/// exactly as [`assemble_snapshot`].
+///
+/// Opening the app thus lazily reconciles DRIP once per new dividend; a same-day
+/// re-open is a no-op (the catch-up engine is re-entrant). Re-baselining on upload
+/// (the per-account upsert, §6) restores `Uploaded` provenance.
+///
+/// # Errors
+/// [`ServiceError`] if the catch-up engine errors on any position; a market
+/// provider error on any ticker propagates (wrapped) the same as
+/// [`assemble_snapshot`].
+pub async fn assemble_snapshot_with_drip(
+    user_id: UserId,
+    positions: Vec<Position>,
+    cash_balances: Vec<CashBalance>,
+    market: &dyn MarketDataProvider,
+    drip: &DripCatchUpService,
+    now: DateTime<Utc>,
+) -> Result<PortfolioSnapshot, ServiceError> {
+    // 1. Lazy DRIP catch-up per position (idempotent, re-entrant). Independent per
+    // position, so fan out concurrently (`ARCH-PARALLEL-INDEPENDENT-1`). Each
+    // future returns the position with its `shares` replaced by the estimated
+    // CURRENT count, plus the provenance label.
+    let estimated: Vec<(Position, ShareProvenance)> =
+        try_join_all(positions.into_iter().map(|position| async move {
+            let result = drip.catch_up_position(&position).await?;
+            let estimated_position = Position {
+                shares: result.current_shares,
+                ..position
+            };
+            Ok::<_, ServiceError>((estimated_position, result.provenance))
+        }))
+        .await?;
+
+    // 2. Concurrent quote fan-out over the estimated positions, carrying each
+    // position's provenance onto the priced row.
+    let priced = try_join_all(estimated.into_iter().map(|(position, provenance)| {
+        let market = &market;
+        async move {
+            let quote = market.quote(&position.ticker).await?;
+            Ok::<PricedPosition, MarketDataError>(price_position_with_provenance(
+                position, quote, provenance,
+            ))
+        }
+    }))
+    .await
+    .map_err(|e| ServiceError::AdvisorTransport(e.to_string()))?;
+
+    Ok(assemble_from_priced(user_id, priced, cash_balances, now))
+}
+
+/// Build the aggregate [`PortfolioSnapshot`] from already-priced positions +
+/// balances (the shared tail of both assembly paths).
+#[must_use]
+fn assemble_from_priced(
+    user_id: UserId,
+    priced: Vec<PricedPosition>,
+    cash_balances: Vec<CashBalance>,
+    now: DateTime<Utc>,
+) -> PortfolioSnapshot {
     let buffer_total = sum_reserved(&cash_balances);
     let total_cash = sum_all(&cash_balances);
     let total_invested = sum_market_values(&priced);
-    // v1 net worth is assets-only (`§Open Items 3` resolved): liabilities = ZERO,
-    // a reserved flag, not an assumption.
     let liabilities = Money::ZERO;
     let total = total_cash + total_invested - liabilities;
 
-    Ok(PortfolioSnapshot {
+    PortfolioSnapshot {
         user_id,
         positions: priced,
         cash_balances,
@@ -87,7 +164,7 @@ pub async fn assemble_snapshot(
         },
         total_invested,
         captured_at: now,
-    })
+    }
 }
 
 /// Build a [`PricedPosition`] from a position and its resolved quote.

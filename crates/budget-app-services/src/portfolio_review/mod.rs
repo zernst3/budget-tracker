@@ -46,10 +46,16 @@ pub struct GeneratePortfolioReview {
     advisor: Arc<dyn InvestmentAdvisor>,
     review_runs: Arc<dyn ReviewRunRepository>,
     uow: Arc<dyn UowProvider>,
+    /// The DRIP catch-up engine (P7.4). When present, the grounding snapshot is
+    /// assembled through it so the AI review reconciles against the ESTIMATED
+    /// current shares WITH the provenance label (§2.5/§8, `BUDGET-AI-1`); when
+    /// `None` the legacy `Uploaded`-only assembly runs (older tests / no DRIP).
+    drip: Option<Arc<crate::portfolio_drip::DripCatchUpService>>,
 }
 
 impl GeneratePortfolioReview {
-    /// Assemble the use-case from its ports.
+    /// Assemble the use-case from its ports (no DRIP — legacy `Uploaded`-only
+    /// grounding). Use [`with_drip`](Self::with_drip) to wire the catch-up engine.
     #[must_use]
     pub fn new(
         positions: Arc<dyn PositionSource>,
@@ -66,7 +72,17 @@ impl GeneratePortfolioReview {
             advisor,
             review_runs,
             uow,
+            drip: None,
         }
+    }
+
+    /// Wire the DRIP catch-up engine onto the use-case (P7.4): the grounding
+    /// snapshot then reflects each position's estimated current shares + its
+    /// provenance label (§2.5/§8).
+    #[must_use]
+    pub fn with_drip(mut self, drip: Arc<crate::portfolio_drip::DripCatchUpService>) -> Self {
+        self.drip = Some(drip);
+        self
     }
 
     /// Generate (and persist) a portfolio review for `user_id` at `now`.
@@ -115,10 +131,25 @@ impl GeneratePortfolioReview {
             return self.persist(run).await;
         }
 
-        // 3. Concurrent quotes + snapshot assembly.
-        let snapshot = assemble_snapshot(user_id, positions, balances, self.market.as_ref(), now)
-            .await
-            .map_err(|e| ServiceError::AdvisorTransport(e.to_string()))?;
+        // 3. Concurrent quotes + snapshot assembly. When the DRIP engine is wired
+        // (P7.4), assemble through it so the review reconciles against the
+        // ESTIMATED current shares + provenance label (§2.5/§8); otherwise the
+        // legacy `Uploaded`-only assembly.
+        let snapshot = if let Some(drip) = &self.drip {
+            crate::portfolio_snapshot::assemble_snapshot_with_drip(
+                user_id,
+                positions,
+                balances,
+                self.market.as_ref(),
+                drip.as_ref(),
+                now,
+            )
+            .await?
+        } else {
+            assemble_snapshot(user_id, positions, balances, self.market.as_ref(), now)
+                .await
+                .map_err(|e| ServiceError::AdvisorTransport(e.to_string()))?
+        };
 
         // 4. The model call, latency-measured.
         let started = Instant::now();

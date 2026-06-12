@@ -145,6 +145,15 @@ async fn main() -> anyhow::Result<()> {
     let portfolio_review_uow_db = connect()
         .await
         .context("connecting to the database (portfolio review uow)")?;
+    // Phase 7.4: the DRIP catch-up engine's dividend-event cache + append-only
+    // applications chain. Each gets its own pool handle (same SeaORM `mock`-feature
+    // `Clone` reason).
+    let portfolio_dividend_cache_db = connect()
+        .await
+        .context("connecting to the database (portfolio dividend cache)")?;
+    let portfolio_drip_applications_db = connect()
+        .await
+        .context("connecting to the database (portfolio drip applications)")?;
 
     // Apply pending schema migrations before serving any traffic (idempotent).
     run_pending_migrations(&db)
@@ -215,6 +224,8 @@ async fn main() -> anyhow::Result<()> {
                     portfolio_balances_db,
                     portfolio_review_runs_db,
                     portfolio_review_uow_db,
+                    portfolio_dividend_cache_db,
+                    portfolio_drip_applications_db,
                     user.id,
                 ) {
                     Ok(ps) => Some(ps),

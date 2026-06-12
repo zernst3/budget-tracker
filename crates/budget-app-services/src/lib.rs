@@ -49,5 +49,5 @@ pub use portfolio_review::GeneratePortfolioReview;
 pub use portfolio_review::reconcile::{
     MONEY_BAND, PERCENT_PRECISION_DP, ReconcileResult, reconcile,
 };
-pub use portfolio_snapshot::{assemble_snapshot, price_position};
+pub use portfolio_snapshot::{assemble_snapshot, assemble_snapshot_with_drip, price_position};
 pub use triage::{PendingTransaction, Treatment, TriageInput, TriageOutcome, TriageService};

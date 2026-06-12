@@ -533,3 +533,125 @@ async fn two_runs_apply_a_newly_appearing_later_dividend() {
     // e2 compounds on 109: raw = (1×109)/10 = 10.9; ×0.9 = 9.81 → 109 + 9.81 = 118.81.
     assert_eq!(r2.current_shares, Decimal::new(118_810, 3));
 }
+
+// ===========================================================================
+// Snapshot wire-in (P7.4): assemble_snapshot_with_drip applies catch-up then
+// prices the ESTIMATED current shares and carries the provenance label.
+// ===========================================================================
+
+use budget_domain::portfolio::{MarketDataError, MarketDataProvider, PriceProvenance, PriceQuote};
+
+/// A market provider returning a fixed current quote for every ticker.
+struct FlatMarket {
+    price: Money,
+}
+
+#[async_trait]
+impl MarketDataProvider for FlatMarket {
+    async fn quote(&self, _ticker: &Ticker) -> Result<Option<PriceQuote>, MarketDataError> {
+        Ok(Some(PriceQuote {
+            price: self.price,
+            provenance: PriceProvenance::Market {
+                source: "flat".to_owned(),
+            },
+            as_of: Utc::now(),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn snapshot_with_drip_prices_estimated_shares_and_labels_provenance() {
+    use crate::portfolio_snapshot::assemble_snapshot_with_drip;
+
+    // A DRIP-on position: 100 shares baseline, one $1.00/share dividend at $10.
+    // raw_new = (1.00 × 100) / 10 = 10; × buffer 0.90 = 9.000 → current = 109.000.
+    let apps = Arc::new(MemApplications::default());
+    let balances = Arc::new(MemBalances::default());
+    let pos = position(100, true, baseline(2026, 1, 1));
+    let user_id = pos.user_id;
+    let svc = service(
+        vec![event("AAPL", date(2026, 2, 15), 100)],
+        FixedPrice::at(1000),
+        DripConfig::default(),
+        Arc::clone(&apps),
+        Arc::clone(&balances),
+    );
+    // Current quote $50/share → market value = 109.000 × 50 = $5450.00 (the
+    // ESTIMATED shares, not the 100-share baseline = $5000).
+    let market = FlatMarket {
+        price: Money::from_minor(5_000),
+    };
+
+    let snap = assemble_snapshot_with_drip(user_id, vec![pos], vec![], &market, &svc, Utc::now())
+        .await
+        .unwrap();
+
+    assert_eq!(snap.positions.len(), 1);
+    let pp = &snap.positions[0];
+    // The priced row reflects the ESTIMATED current share count.
+    assert_eq!(pp.position.shares, Decimal::new(109_000, 3));
+    assert_eq!(pp.market_value, Some(Money::from_minor(545_000)));
+    assert_eq!(snap.total_invested, Money::from_minor(545_000));
+    // Provenance is the DRIP-estimate label (one event since baseline).
+    match &pp.share_provenance {
+        ShareProvenance::DripEstimated { events_applied, .. } => {
+            assert_eq!(*events_applied, 1);
+        }
+        ShareProvenance::Uploaded => panic!("expected a DripEstimated label"),
+    }
+}
+
+#[tokio::test]
+async fn snapshot_with_drip_is_idempotent_across_reopens() {
+    // Re-running assembly the same day posts nothing extra and yields the same
+    // estimated shares (the catch-up engine is re-entrant,
+    // BUDGET-IDEMPOTENT-MONTH-INIT-1).
+    use crate::portfolio_snapshot::assemble_snapshot_with_drip;
+
+    let apps = Arc::new(MemApplications::default());
+    let balances = Arc::new(MemBalances::default());
+    let pos = position(100, true, baseline(2026, 1, 1));
+    let user_id = pos.user_id;
+    let market = FlatMarket {
+        price: Money::from_minor(5_000),
+    };
+
+    let build = || {
+        service(
+            vec![event("AAPL", date(2026, 2, 15), 100)],
+            FixedPrice::at(1000),
+            DripConfig::default(),
+            Arc::clone(&apps),
+            Arc::clone(&balances),
+        )
+    };
+
+    let snap1 = assemble_snapshot_with_drip(
+        user_id,
+        vec![pos.clone()],
+        vec![],
+        &market,
+        &build(),
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    let snap2 =
+        assemble_snapshot_with_drip(user_id, vec![pos], vec![], &market, &build(), Utc::now())
+            .await
+            .unwrap();
+
+    assert_eq!(
+        snap1.positions[0].position.shares, snap2.positions[0].position.shares,
+        "a same-day reopen yields the same estimated shares"
+    );
+    assert_eq!(snap1.total_invested, snap2.total_invested);
+    // Exactly one application persisted across both reopens.
+    assert_eq!(
+        apps.list_for_position(snap1.positions[0].position.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}

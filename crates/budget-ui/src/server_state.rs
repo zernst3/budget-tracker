@@ -564,11 +564,17 @@ pub struct PortfolioState {
     pub uow: Arc<dyn budget_domain::uow::UowProvider>,
     /// How the review advisor is built (mock vs real Gemini) — `AI_MODE`.
     pub advisor_mode: PortfolioAdvisorMode,
+    /// The lazy, idempotent DRIP catch-up engine (`docs/DRIP_REALTIME_DESIGN.md
+    /// §6`, P7.4). Run during snapshot assembly so opening the app applies any new
+    /// dividends once each. `Arc`-shared so the cheap `PortfolioState` clone holds
+    /// one engine.
+    pub drip: Arc<budget_app_services::DripCatchUpService>,
 }
 
 impl PortfolioState {
     /// Assemble from collaborators (used directly by tests injecting fakes).
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         position_source: Arc<dyn budget_domain::repositories::PositionRepository>,
         balance_source: Arc<dyn budget_domain::repositories::CashBalanceRepository>,
@@ -576,6 +582,7 @@ impl PortfolioState {
         review_runs: Arc<dyn budget_domain::repositories::ReviewRunRepository>,
         uow: Arc<dyn budget_domain::uow::UowProvider>,
         advisor_mode: PortfolioAdvisorMode,
+        drip: Arc<budget_app_services::DripCatchUpService>,
     ) -> Self {
         Self {
             position_source,
@@ -584,6 +591,7 @@ impl PortfolioState {
             review_runs,
             uow,
             advisor_mode,
+            drip,
         }
     }
 
@@ -622,6 +630,9 @@ impl PortfolioState {
             Arc::clone(&self.balance_source)
                 as Arc<dyn budget_domain::portfolio::CashBalanceSource>;
 
+        // Wire the DRIP catch-up engine so the AI review grounds against the
+        // ESTIMATED current shares WITH the provenance label (§2.5/§8,
+        // `BUDGET-AI-1`).
         Ok(budget_app_services::GeneratePortfolioReview::new(
             positions,
             balances,
@@ -629,7 +640,8 @@ impl PortfolioState {
             advisor,
             Arc::clone(&self.review_runs),
             Arc::clone(&self.uow),
-        ))
+        )
+        .with_drip(Arc::clone(&self.drip)))
     }
 
     /// Wire the production `PortfolioState` from independent live `SeaORM`
@@ -649,24 +661,31 @@ impl PortfolioState {
     /// # Errors
     /// Returns an error string if the real path is selected but `KEY_VAULT_URL` is
     /// missing/invalid or `GEMINI_MODEL_IDS` resolves to an empty list.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_connections(
         positions_db: DatabaseConnection,
         balances_db: DatabaseConnection,
         review_runs_db: DatabaseConnection,
         review_uow_db: DatabaseConnection,
+        dividend_cache_db: DatabaseConnection,
+        drip_applications_db: DatabaseConnection,
         balances_user_id: budget_domain::ids::UserId,
     ) -> Result<Self, String> {
+        use budget_app_services::{DripCatchUpService, DripConfig};
         use budget_domain::auth::SecretVault;
-        use budget_domain::portfolio::MarketDataProvider;
+        use budget_domain::portfolio::{DividendSource, MarketDataProvider};
         use budget_domain::repositories::{
-            CashBalanceRepository, PositionRepository, ReviewRunRepository,
+            CashBalanceRepository, DividendEventCache, DripApplicationRepository,
+            PositionRepository, ReviewRunRepository,
         };
         use budget_domain::uow::UowProvider;
         use budget_infrastructure::{
-            AzureKeyVault, ChainMarketDataProvider, FinnhubMarketData, InMemorySecretVault,
-            ManualCashBalanceSource, ManualPositionSource, ManualPriceSource,
-            MockMarketDataProvider, PostgresReviewRunRepository, SeaOrmUowProvider,
-            StooqMarketData,
+            AzureKeyVault, ChainDividendSource, ChainMarketDataProvider, FinnhubMarketData,
+            InMemorySecretVault, ManualCashBalanceSource, ManualDividendSource,
+            ManualPositionSource, ManualPriceSource, MockDividendSource, MockMarketDataProvider,
+            PostgresDividendEventCache, PostgresDripApplicationRepository,
+            PostgresReviewRunRepository, SeaOrmUowProvider, StooqMarketData, TiingoDividendSource,
+            YahooDividendSource,
         };
 
         let position_source: Arc<dyn PositionRepository> =
@@ -677,49 +696,84 @@ impl PortfolioState {
             Arc::new(PostgresReviewRunRepository::new(review_runs_db));
         let uow: Arc<dyn UowProvider> = Arc::new(SeaOrmUowProvider::new(review_uow_db));
 
-        // Select market provider + advisor mode by AI_MODE (the mock is reached
-        // ONLY by the exact `AI_MODE=mock` opt-in).
+        // Select market provider + advisor mode + dividend source by AI_MODE (the
+        // mock is reached ONLY by the exact `AI_MODE=mock` opt-in).
         let mock_mode = std::env::var("AI_MODE").as_deref() == Ok("mock");
-        let (market, advisor_mode): (Arc<dyn MarketDataProvider>, PortfolioAdvisorMode) =
-            if mock_mode {
-                tracing::warn!(
-                    "AI_MODE=mock — using the LOCAL MockInvestmentAdvisor + \
-                     MockMarketDataProvider + in-memory secret store (NO real Gemini / \
-                     market feed / Key Vault). This is a local-testing path; it must \
-                     NEVER be set in production."
-                );
-                let _mock_vault: Arc<dyn SecretVault> = Arc::new(InMemorySecretVault::new());
-                (
-                    Arc::new(MockMarketDataProvider::new()),
-                    PortfolioAdvisorMode::Mock,
-                )
-            } else {
-                // Real path. Require KEY_VAULT_URL (the Gemini + Finnhub keys live
-                // there) AND a non-empty model allow-list, else Err -> 503.
-                let vault_url = std::env::var("KEY_VAULT_URL").map_err(|_| {
-                    "AI real path: KEY_VAULT_URL is required (the Gemini/Finnhub API \
-                     keys are vault secrets); refusing to fall back to the mock"
-                        .to_owned()
-                })?;
-                if crate::services::portfolio_review::allowed_model_ids().is_empty() {
-                    return Err("AI real path: GEMINI_MODEL_IDS resolved to an empty \
-                                allow-list"
-                        .to_owned());
-                }
-                let vault: Arc<dyn SecretVault> =
-                    Arc::new(AzureKeyVault::new(&vault_url).map_err(|e| e.to_string())?);
+        let (market, advisor_mode, dividends): (
+            Arc<dyn MarketDataProvider>,
+            PortfolioAdvisorMode,
+            Arc<dyn DividendSource>,
+        ) = if mock_mode {
+            tracing::warn!(
+                "AI_MODE=mock — using the LOCAL MockInvestmentAdvisor + \
+                 MockMarketDataProvider + MockDividendSource + in-memory secret store \
+                 (NO real Gemini / market feed / dividend feed / Key Vault). This is a \
+                 local-testing path; it must NEVER be set in production."
+            );
+            let _mock_vault: Arc<dyn SecretVault> = Arc::new(InMemorySecretVault::new());
+            (
+                Arc::new(MockMarketDataProvider::new()),
+                PortfolioAdvisorMode::Mock,
+                Arc::new(MockDividendSource::new()),
+            )
+        } else {
+            // Real path. Require KEY_VAULT_URL (the Gemini + Finnhub keys live
+            // there) AND a non-empty model allow-list, else Err -> 503.
+            let vault_url = std::env::var("KEY_VAULT_URL").map_err(|_| {
+                "AI real path: KEY_VAULT_URL is required (the Gemini/Finnhub API \
+                 keys are vault secrets); refusing to fall back to the mock"
+                    .to_owned()
+            })?;
+            if crate::services::portfolio_review::allowed_model_ids().is_empty() {
+                return Err("AI real path: GEMINI_MODEL_IDS resolved to an empty \
+                            allow-list"
+                    .to_owned());
+            }
+            let vault: Arc<dyn SecretVault> =
+                Arc::new(AzureKeyVault::new(&vault_url).map_err(|e| e.to_string())?);
 
-                // The market-data fallback chain: Finnhub (key from vault) -> Stooq
-                // (keyless) -> manual -> None. Runs with NO key (Stooq + manual);
-                // the Finnhub key only upgrades to real-time quotes.
-                let finnhub: Arc<dyn MarketDataProvider> =
-                    Arc::new(FinnhubMarketData::new(Arc::clone(&vault)));
-                let stooq: Arc<dyn MarketDataProvider> = Arc::new(StooqMarketData::new());
-                let manual: Arc<dyn MarketDataProvider> = Arc::new(ManualPriceSource::new());
-                let chain: Arc<dyn MarketDataProvider> =
-                    Arc::new(ChainMarketDataProvider::new(vec![finnhub, stooq, manual]));
-                (chain, PortfolioAdvisorMode::Real { vault })
-            };
+            // The market-data fallback chain: Finnhub (key from vault) -> Stooq
+            // (keyless) -> manual -> None. Runs with NO key (Stooq + manual);
+            // the Finnhub key only upgrades to real-time quotes.
+            let finnhub: Arc<dyn MarketDataProvider> =
+                Arc::new(FinnhubMarketData::new(Arc::clone(&vault)));
+            let stooq: Arc<dyn MarketDataProvider> = Arc::new(StooqMarketData::new());
+            let manual: Arc<dyn MarketDataProvider> = Arc::new(ManualPriceSource::new());
+            let chain: Arc<dyn MarketDataProvider> =
+                Arc::new(ChainMarketDataProvider::new(vec![finnhub, stooq, manual]));
+
+            // The dividend fallback chain (§6/§7): Tiingo (key from the same vault)
+            // -> Yahoo (keyless) -> manual entry. Same resilience shape as the
+            // market chain; cached in `dividend_events`.
+            let tiingo: Arc<dyn DividendSource> =
+                Arc::new(TiingoDividendSource::new(Arc::clone(&vault)));
+            let yahoo: Arc<dyn DividendSource> = Arc::new(YahooDividendSource::new());
+            let manual_div: Arc<dyn DividendSource> = Arc::new(ManualDividendSource::new());
+            let div_chain: Arc<dyn DividendSource> =
+                Arc::new(ChainDividendSource::new(vec![tiingo, yahoo, manual_div]));
+
+            (chain, PortfolioAdvisorMode::Real { vault }, div_chain)
+        };
+
+        // The DRIP catch-up engine (P7.4): the dividend source + a cache repo + a
+        // pay-date price source (approximating with the current quote, see
+        // `MarketQuotePayDatePriceSource`) + the append-only applications chain +
+        // the cash-balance writer (DRIP-off dividends -> account cash,
+        // BUDGET-CASH-1).
+        let cache: Arc<dyn DividendEventCache> =
+            Arc::new(PostgresDividendEventCache::new(dividend_cache_db));
+        let applications: Arc<dyn DripApplicationRepository> =
+            Arc::new(PostgresDripApplicationRepository::new(drip_applications_db));
+        let prices: Arc<dyn budget_app_services::PayDatePriceSource> =
+            Arc::new(MarketQuotePayDatePriceSource::new(Arc::clone(&market)));
+        let drip = Arc::new(DripCatchUpService::new(
+            dividends,
+            cache,
+            prices,
+            applications,
+            Arc::clone(&balance_source) as Arc<dyn CashBalanceRepository>,
+            DripConfig::default(),
+        ));
 
         Ok(Self::new(
             position_source,
@@ -728,6 +782,7 @@ impl PortfolioState {
             review_runs,
             uow,
             advisor_mode,
+            drip,
         ))
     }
 
@@ -747,5 +802,57 @@ impl PortfolioState {
                 details: None,
             })?;
         Ok(state)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MarketQuotePayDatePriceSource — the DRIP engine's pay-date price adapter
+// ---------------------------------------------------------------------------
+
+/// A [`PayDatePriceSource`](budget_app_services::PayDatePriceSource) that
+/// approximates a dividend pay-date price with the market-data chain's CURRENT
+/// quote (`docs/DRIP_REALTIME_DESIGN.md §3/§6`, flagged best-effort).
+///
+/// The catch-up engine needs the per-share price on a dividend pay-date, but the
+/// already-built [`MarketDataProvider`](budget_domain::portfolio::MarketDataProvider)
+/// chain (Finnhub → Stooq → manual → None) resolves only the current quote, not a
+/// historical one. This adapter approximates with the current quote — an explicit,
+/// documented best-effort (`ORCH-TRAINING-CUTOFF-1`): the free market chain carries
+/// no historical-price endpoint, the design accepts a best-estimate reconciled on
+/// each re-upload (§2.1), and the approximation affects only the conservatively
+/// buffered, floor-rounded DRIP *accretion* (never the confirmed baseline), which
+/// self-corrects when the user re-uploads (§6). When the provider returns
+/// `Ok(None)` the event is HELD (no accretion against a missing price, §3). A true
+/// historical-price source slots in behind this same port later with no engine
+/// change.
+///
+/// This adapter lives in `budget-ui`'s server-only wiring layer (not
+/// `budget-infrastructure`) because it bridges the `budget-app-services`
+/// `PayDatePriceSource` port to the infrastructure market chain, and the
+/// infrastructure LIBRARY must not depend on `budget-app-services` (the
+/// downward-layering edge is dev-only there).
+struct MarketQuotePayDatePriceSource {
+    market: Arc<dyn budget_domain::portfolio::MarketDataProvider>,
+}
+
+impl MarketQuotePayDatePriceSource {
+    fn new(market: Arc<dyn budget_domain::portfolio::MarketDataProvider>) -> Self {
+        Self { market }
+    }
+}
+
+#[async_trait::async_trait]
+impl budget_app_services::PayDatePriceSource for MarketQuotePayDatePriceSource {
+    async fn price_on(
+        &self,
+        ticker: &budget_domain::portfolio::Ticker,
+        _pay_date: chrono::NaiveDate,
+    ) -> Result<Option<budget_domain::money::Money>, budget_app_services::error::ServiceError> {
+        // A transport error propagates; a `None` quote HOLDS the event (never
+        // applied against a missing price, §3).
+        let quote = self.market.quote(ticker).await.map_err(|e| {
+            budget_app_services::error::ServiceError::AdvisorTransport(e.to_string())
+        })?;
+        Ok(quote.map(|q| q.price))
     }
 }

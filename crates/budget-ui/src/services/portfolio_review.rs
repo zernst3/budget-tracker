@@ -903,12 +903,17 @@ pub async fn upsert_cash_balance(input: CashBalanceDto) -> Result<CashBalanceDto
     Ok(cash_balance_to_dto(input.id, &balance))
 }
 
-/// Assemble the grounding snapshot for the authenticated user (`§Phase 3`):
-/// load positions + balances concurrently, fan out market quotes via
-/// `try_join_all` (`ARCH-PARALLEL-INDEPENDENT-1`), and assemble the snapshot.
+/// Assemble the grounding snapshot for the authenticated user (`§Phase 3`,
+/// `§Phase 7.4`): load positions + balances concurrently, FIRST run the lazy
+/// idempotent DRIP catch-up engine per position (apply any new dividends once
+/// each, `BUDGET-IDEMPOTENT-MONTH-INIT-1`), then fan out market quotes via
+/// `try_join_all` (`ARCH-PARALLEL-INDEPENDENT-1`) and assemble the snapshot. The
+/// priced rows carry the estimated current shares + each position's
+/// [`ShareProvenance`](budget_domain::portfolio::ShareProvenance) label so nothing
+/// estimated renders as confirmed (`BUDGET-AI-1`).
 ///
 /// # Errors
-/// `ServerFnError` (401) without a valid session; 500 on persistence/market
+/// `ServerFnError` (401) without a valid session; 500 on persistence/market/DRIP
 /// failure.
 #[allow(clippy::unused_async)]
 #[server]
@@ -927,11 +932,12 @@ pub async fn portfolio_snapshot() -> Result<PortfolioSnapshotDto, ServerFnError>
     )
     .map_err(|e| internal_error(e.to_string()))?;
 
-    let snapshot = budget_app_services::assemble_snapshot(
+    let snapshot = budget_app_services::assemble_snapshot_with_drip(
         user.id(),
         positions,
         balances,
         state.market.as_ref(),
+        state.drip.as_ref(),
         chrono::Utc::now(),
     )
     .await

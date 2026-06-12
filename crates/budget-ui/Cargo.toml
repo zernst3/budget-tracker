@@ -42,6 +42,7 @@ server = [
     "dep:tracing",
     "dep:uuid",
     "dep:chrono-tz",
+    "dep:async-trait",
 ]
 # The wasm32 hydrating client bundle. `dx serve` / the deploy build selects this
 # for the browser target.
@@ -91,6 +92,9 @@ budget-app-services = { path = "../budget-app-services", optional = true }
 budget-infrastructure = { path = "../budget-infrastructure", optional = true }
 tokio = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
+# Server-only: the DRIP pay-date price adapter in `server_state` implements the
+# app-services `PayDatePriceSource` port via `#[async_trait]` (P7.4 wire-in).
+async-trait = { workspace = true, optional = true }
 
 # Server-only: the SeaORM connection the server state is built from, and the
 # tower-sessions `Session` handle the gate + login/logout server functions use.
