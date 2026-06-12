@@ -36,6 +36,8 @@ pub mod accounts;
 pub mod budgets;
 pub mod cash_balances;
 pub mod categories;
+pub mod dividend_events;
+pub mod drip_applications;
 pub mod funds;
 pub mod months;
 pub mod paycheck_config;

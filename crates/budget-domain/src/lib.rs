@@ -60,8 +60,9 @@ pub use enums::{
 pub use error::{DomainError, RepositoryError, ValidationError};
 pub use fund::Fund;
 pub use ids::{
-    AccountId, BudgetId, CategoryId, CategoryKey, FundId, MonthId, PaycheckConfigId, PlaidItemId,
-    PositionId, RepaymentObligationId, ReviewRunId, TransactionId, UserId, WebauthnCredentialId,
+    AccountId, BudgetId, CategoryId, CategoryKey, DividendEventId, DripApplicationId, FundId,
+    MonthId, PaycheckConfigId, PlaidItemId, PositionId, RepaymentObligationId, ReviewRunId,
+    TransactionId, UserId, WebauthnCredentialId,
 };
 pub use money::Money;
 pub use month::Month;
@@ -73,9 +74,10 @@ pub use plaid_api::{
 pub use plaid_item::PlaidItem;
 pub use portfolio::{
     AdvisorError, AdvisorOutput, CashBalance, CashBalanceSource, Claim, ClaimSubject, Confidence,
+    DividendEvent, DividendSource, DividendSourceError, DividendSourceKind, DripApplication,
     InvestmentAdvisor, MarketDataError, MarketDataProvider, NetWorth, PortfolioSnapshot, Position,
     PositionSource, PriceProvenance, PriceQuote, PricedPosition, Recommendation, ReviewRun,
-    ReviewTerminalState, Ticker, UnverifiedReason, ValidationOutcome,
+    ReviewTerminalState, ShareProvenance, Ticker, UnverifiedReason, ValidationOutcome,
 };
 pub use predicates::{
     FixedSettlement, counts_in_budget, counts_in_month_expense_remaining, envelope_category_spent,
@@ -84,9 +86,9 @@ pub use predicates::{
 pub use projections::{CategorySpent, MonthNet};
 pub use repayment_obligation::RepaymentObligation;
 pub use repositories::{
-    BudgetRepository, CashBalanceRepository, FundRepository, MonthRepository,
-    PaycheckConfigRepository, PlaidItemRepository, PositionRepository, ReviewRunRepository,
-    TransactionRepository, UserRepository,
+    BudgetRepository, CashBalanceRepository, DividendEventCache, DripApplicationRepository,
+    FundRepository, MonthRepository, PaycheckConfigRepository, PlaidItemRepository,
+    PositionRepository, ReviewRunRepository, TransactionRepository, UserRepository,
 };
 pub use transaction::Transaction;
 pub use uow::{UnitOfWork, UowFuture, UowProvider, UowProviderExt};

@@ -40,7 +40,7 @@ use budget_domain::ids::UserId;
 use budget_domain::money::Money;
 use budget_domain::portfolio::{
     CashBalance, MarketDataError, MarketDataProvider, NetWorth, PortfolioSnapshot, Position,
-    PriceQuote, PricedPosition,
+    PriceQuote, PricedPosition, ShareProvenance,
 };
 
 /// Resolve quotes for `positions` concurrently and assemble the grounding
@@ -97,6 +97,26 @@ pub async fn assemble_snapshot(
 /// type documents).
 #[must_use]
 pub fn price_position(position: Position, quote: Option<PriceQuote>) -> PricedPosition {
+    // Phase 7 catch-up has not run here: the share count is the confirmed
+    // baseline, so provenance is `Uploaded`. The DRIP wire-in (P7.4) replaces this
+    // with `price_position_with_provenance` carrying the accreted shares + label.
+    price_position_with_provenance(position, quote, ShareProvenance::Uploaded)
+}
+
+/// Build a [`PricedPosition`] from a position, its resolved quote, and an explicit
+/// [`ShareProvenance`] label (Phase 7).
+///
+/// `effective_shares` for the market value comes from the position's `shares`
+/// field, which the DRIP catch-up engine has already replaced with the estimated
+/// current count (baseline + accretion) before assembly when DRIP is active; the
+/// `provenance` carries the label so the UI / AI review present the estimate
+/// honestly (`BUDGET-AI-1`).
+#[must_use]
+pub fn price_position_with_provenance(
+    position: Position,
+    quote: Option<PriceQuote>,
+    provenance: ShareProvenance,
+) -> PricedPosition {
     let market_value = quote
         .as_ref()
         .map(|q| Money::from_decimal(position.shares * q.price.as_decimal()).round_to_cents());
@@ -104,6 +124,7 @@ pub fn price_position(position: Position, quote: Option<PriceQuote>) -> PricedPo
         position,
         quote,
         market_value,
+        share_provenance: provenance,
     }
 }
 
@@ -167,6 +188,8 @@ mod tests {
             account_type: AccountType::Investment,
             shares: Decimal::new(shares, 0),
             cost_basis: None,
+            drip_enabled: false,
+            baseline_as_of: now,
             created_at: now,
             updated_at: now,
         }

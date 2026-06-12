@@ -16,7 +16,8 @@ use budget_domain::ids::{PositionId, UserId};
 use budget_domain::money::Money;
 use budget_domain::portfolio::{
     Claim, ClaimSubject, Confidence, NetWorth, PortfolioSnapshot, Position, PriceProvenance,
-    PriceQuote, PricedPosition, Recommendation, Ticker, UnverifiedReason, ValidationOutcome,
+    PriceQuote, PricedPosition, Recommendation, ShareProvenance, Ticker, UnverifiedReason,
+    ValidationOutcome,
 };
 
 use super::{MONEY_BAND, reconcile};
@@ -45,6 +46,8 @@ fn priced(
         account_type: AccountType::Investment,
         shares: Decimal::new(shares, 0),
         cost_basis,
+        drip_enabled: false,
+        baseline_as_of: now,
         created_at: now,
         updated_at: now,
     };
@@ -66,6 +69,7 @@ fn priced(
         position,
         quote,
         market_value,
+        share_provenance: ShareProvenance::Uploaded,
     }
 }
 

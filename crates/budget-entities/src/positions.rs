@@ -35,10 +35,16 @@ pub struct Model {
     pub account_label: String,
     /// Reuses the shared `account_type` pg-enum (`super::accounts::AccountType`).
     pub account_type: super::accounts::AccountType,
-    /// Number of shares — a COUNT, never money (`BUDGET-MONEY-1`). NUMERIC.
+    /// Confirmed baseline share COUNT, never money (`BUDGET-MONEY-1`). NUMERIC.
     pub shares: Decimal,
     /// Optional cost basis. NUMERIC money — never f64 (`BUDGET-MONEY-1`).
     pub cost_basis: Option<Decimal>,
+    /// Per-position DRIP toggle (Phase 7, m0008). BOOLEAN NOT NULL DEFAULT false.
+    /// PERSISTS across uploads for surviving positions (§2.7/§6).
+    pub drip_enabled: bool,
+    /// As-of date of the confirmed `shares` baseline (Phase 7, m0008,
+    /// `BUDGET-CUTOVER-1`). TIMESTAMPTZ; DRIP applies to events after it.
+    pub baseline_as_of: DateTimeWithTimeZone,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
 }

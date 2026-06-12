@@ -25,13 +25,13 @@
 //! enforcement of that coupling (`BUDGET-AI-1`).
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::enums::AccountType;
 use crate::error::{RepositoryError, ValidationError};
-use crate::ids::{PositionId, ReviewRunId, UserId};
+use crate::ids::{DripApplicationId, PositionId, ReviewRunId, UserId};
 use crate::money::Money;
 
 // ===========================================================================
@@ -133,6 +133,142 @@ pub struct PriceQuote {
 }
 
 // ===========================================================================
+// Dividend events + share provenance (Phase 7 — DRIP & real-time tracking)
+// ===========================================================================
+
+/// Where a [`DividendEvent`] came from — one of the chain tiers (Tiingo → Yahoo →
+/// manual), mirroring [`PriceProvenance`] for the dividend side.
+///
+/// Carried on the event so the cache row records provenance and the UI/audit can
+/// distinguish a fetched dividend from a user-confirmed manual one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DividendSourceKind {
+    /// A dividend fetched from Tiingo (the primary free EOD chain tier).
+    Tiingo,
+    /// A dividend fetched from Yahoo's keyless v8 `events=div` endpoint.
+    Yahoo,
+    /// A user-entered manual dividend (the ultimate fallback tier).
+    Manual,
+    /// A mock/test-fixture dividend (no real feed).
+    Mock,
+}
+
+impl DividendSourceKind {
+    /// The lowercase wire/storage label for this source (`"tiingo"`, `"yahoo"`,
+    /// `"manual"`, `"mock"`) — the value persisted in `dividend_events.source`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            DividendSourceKind::Tiingo => "tiingo",
+            DividendSourceKind::Yahoo => "yahoo",
+            DividendSourceKind::Manual => "manual",
+            DividendSourceKind::Mock => "mock",
+        }
+    }
+
+    /// Parse a stored/wire source label back into the kind.
+    ///
+    /// # Errors
+    /// [`ValidationError::Format`] if `raw` is not one of the four known labels.
+    pub fn try_from_str(raw: &str) -> Result<Self, ValidationError> {
+        match raw {
+            "tiingo" => Ok(DividendSourceKind::Tiingo),
+            "yahoo" => Ok(DividendSourceKind::Yahoo),
+            "manual" => Ok(DividendSourceKind::Manual),
+            "mock" => Ok(DividendSourceKind::Mock),
+            other => Err(ValidationError::Format {
+                field: "dividend_source",
+                reason: format!("unknown dividend source '{other}'"),
+            }),
+        }
+    }
+}
+
+/// One dividend payment for a ticker: the ex-date, the pay-date, and the cash
+/// amount per share, plus where it was sourced from.
+///
+/// `amount_per_share` is exact [`Money`] (`BUDGET-MONEY-1`). The DRIP catch-up
+/// engine applies events with `pay_date > baseline_as_of` in chronological order
+/// (§3). Identity in the `dividend_events` cache is `(ticker, pay_date)` so a
+/// ticker's dividends are fetched once and shared across positions holding it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DividendEvent {
+    /// The ticker this dividend was paid on.
+    pub ticker: Ticker,
+    /// The ex-dividend date (the trade-date cutoff for eligibility).
+    pub ex_date: NaiveDate,
+    /// The pay-date — when the dividend actually pays (the DRIP-apply key).
+    pub pay_date: NaiveDate,
+    /// The cash amount per share (exact `Money`, `BUDGET-MONEY-1`).
+    pub amount_per_share: Money,
+    /// Which chain tier produced this event.
+    pub source: DividendSourceKind,
+}
+
+/// The provenance of a [`PricedPosition`]'s share count — confirmed (`Uploaded`)
+/// vs. a DRIP estimate accreted since the last upload (`DripEstimated`).
+///
+/// Surfaced on the snapshot / DTO / UI and reflected in the AI review so nothing
+/// estimated is presented as confirmed truth (`BUDGET-AI-1`, §2.5/§8). An upload
+/// re-baselines the position and restores `Uploaded`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShareProvenance {
+    /// The share count is the confirmed upload baseline (no DRIP accretion since
+    /// `baseline_as_of`).
+    Uploaded,
+    /// The share count includes `events_applied` DRIP estimates accreted since the
+    /// confirmed `baseline_as_of` (a LABELED estimate).
+    DripEstimated {
+        /// How many dividend events have been DRIP-applied since the baseline.
+        events_applied: u32,
+        /// The confirmed-baseline as-of instant the estimate accreted from.
+        baseline_as_of: DateTime<Utc>,
+    },
+}
+
+/// One row in a position's auditable DRIP accretion chain (`drip_applications`,
+/// Phase 7 `m0008`, `BUDGET-ROLLOVER-INTEGRITY-1`).
+///
+/// Append-only system-log semantics (`SQL-AUDIT-COLUMNS-1`): never mutated. The
+/// current share count of a DRIP position is `baseline_shares + Σ shares_added`
+/// over the applications with `pay_date > baseline_as_of` — recomputable, never a
+/// stored mutable scalar. Idempotency is enforced by the DB unique
+/// `(position_id, pay_date)` with `ON CONFLICT DO NOTHING` (§6).
+///
+/// Exactly one of `shares_added` / `cash_added` is meaningful per row:
+/// `drip_on_at_apply == true` → `shares_added` is the accreted shares and
+/// `cash_added` is zero; `false` → `cash_added` is the dividend cash (to the
+/// account `CashBalance`, `BUDGET-CASH-1`) and `shares_added` is zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DripApplication {
+    /// Stable identity for this audit row.
+    pub id: DripApplicationId,
+    /// Owning user (`SPEC §9.1` defense in depth).
+    pub user_id: UserId,
+    /// The position this application accreted (FK → positions, Cascade).
+    pub position_id: PositionId,
+    /// The ticker (denormalized for audit readability).
+    pub ticker: Ticker,
+    /// The dividend pay-date — the idempotency key half (`(position_id, pay_date)`).
+    pub pay_date: NaiveDate,
+    /// The dividend amount per share applied (exact `Money`, `BUDGET-MONEY-1`).
+    pub amount_per_share: Money,
+    /// The per-share price used on the pay-date to value the reinvestment (§3).
+    pub price_used: Money,
+    /// Shares added by this application — a COUNT (`Decimal`, `BUDGET-MONEY-1`);
+    /// `0` when DRIP was off at apply time (then `cash_added` carries the value).
+    pub shares_added: Decimal,
+    /// Cash added to the account `CashBalance` when DRIP was off (`BUDGET-CASH-1`);
+    /// `Money::ZERO` when DRIP was on (then `shares_added` carries the value).
+    pub cash_added: Money,
+    /// Whether DRIP was enabled on the position at the instant this row was applied.
+    pub drip_on_at_apply: bool,
+    /// When this application was computed/written, UTC-anchored
+    /// (`ARCH-UTC-TIMESTAMPS-1`). The single audit timestamp (append-only).
+    pub applied_at: DateTime<Utc>,
+}
+
+// ===========================================================================
 // Position
 // ===========================================================================
 
@@ -154,10 +290,22 @@ pub struct Position {
     pub account_label: String,
     /// The account's tax/category type (reuses [`crate::enums::AccountType`]).
     pub account_type: AccountType,
-    /// Number of shares held — a COUNT, not money (`BUDGET-MONEY-1`).
+    /// Number of shares held — the CONFIRMED baseline COUNT, not money
+    /// (`BUDGET-MONEY-1`). Immutable between uploads; current shares are derived
+    /// (`baseline + Σ drip_applications`, `BUDGET-ROLLOVER-INTEGRITY-1`).
     pub shares: Decimal,
     /// Optional cost basis (what the holding was acquired for).
     pub cost_basis: Option<Money>,
+    /// The per-position, per-account DRIP toggle (Phase 7, `m0008`). When `true` a
+    /// dividend that pays after `baseline_as_of` reinvests into accreted shares
+    /// (a labeled estimate); when `false` the dividend becomes account cash
+    /// (`BUDGET-CASH-1`). PERSISTS across uploads for surviving positions
+    /// (§2.7/§6). Default `false` (DRIP is opt-in).
+    pub drip_enabled: bool,
+    /// The as-of date of the current confirmed `shares` baseline, set on upload
+    /// (Phase 7, `m0008`, `BUDGET-CUTOVER-1`). DRIP accretion applies only to
+    /// dividend events with `pay_date > baseline_as_of`.
+    pub baseline_as_of: DateTime<Utc>,
     /// Row-create instant, UTC-anchored (`ARCH-UTC-TIMESTAMPS-1`).
     pub created_at: DateTime<Utc>,
     /// Row-update instant, UTC-anchored (`ARCH-UTC-TIMESTAMPS-1`).
@@ -214,12 +362,20 @@ pub struct NetWorth {
 /// fallback; `market_value` is `None` exactly when `quote` is `None`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PricedPosition {
-    /// The underlying holding.
+    /// The underlying holding. Its `shares` field is the CONFIRMED baseline; the
+    /// estimated current share count (baseline + DRIP accretion) is reflected in
+    /// `market_value` and labeled by `share_provenance`.
     pub position: Position,
     /// The resolved quote; `None` => failed/stale and no manual fallback.
     pub quote: Option<PriceQuote>,
-    /// `shares * price` rounded to cents; `None` iff `quote` is `None`.
+    /// `current_shares * price` rounded to cents (current shares = baseline + DRIP
+    /// accretion, §3); `None` iff `quote` is `None`.
     pub market_value: Option<Money>,
+    /// Whether the share count is confirmed (`Uploaded`) or a DRIP estimate
+    /// (`DripEstimated`) accreted since the last upload (Phase 7, §2.5/§8). The
+    /// AI review and UI surface this label so nothing estimated reads as confirmed
+    /// (`BUDGET-AI-1`).
+    pub share_provenance: ShareProvenance,
 }
 
 /// The grounding snapshot the advisor reasons over — the locked, citable
@@ -503,6 +659,33 @@ pub trait MarketDataProvider: Send + Sync {
     async fn quote(&self, ticker: &Ticker) -> Result<Option<PriceQuote>, MarketDataError>;
 }
 
+/// The dividend-data port — resolves a ticker's dividend events after a cutoff
+/// date (Phase 7, §5). Object-safe (`Send + Sync`, `#[async_trait]`) so the
+/// catch-up engine can hold `Arc<dyn DividendSource>`.
+///
+/// `Ok(vec![])` => no dividends for that ticker after `since` (not an error). The
+/// concrete adapters (`Tiingo`/`Yahoo`/`Manual`/`Mock`, composed by a chain)
+/// live in `budget-infrastructure`, mirroring the [`MarketDataProvider`] shape.
+#[async_trait]
+pub trait DividendSource: Send + Sync {
+    /// Dividend events for `ticker` whose `pay_date` is strictly after `since`.
+    ///
+    /// `Ok(vec![])` means none. Implementations may cache aggressively (dividends
+    /// are quarterly), so this is safe to call on every snapshot assembly.
+    ///
+    /// # Errors
+    /// [`DividendSourceError::Api`]/[`RateLimited`]/[`SecretVault`] on the
+    /// respective failures.
+    ///
+    /// [`RateLimited`]: DividendSourceError::RateLimited
+    /// [`SecretVault`]: DividendSourceError::SecretVault
+    async fn dividends_since(
+        &self,
+        ticker: &Ticker,
+        since: NaiveDate,
+    ) -> Result<Vec<DividendEvent>, DividendSourceError>;
+}
+
 /// Read port for a user's positions (the `Position` read side; the write side is
 /// [`crate::repositories::PositionRepository`]).
 #[async_trait]
@@ -563,6 +746,22 @@ pub enum MarketDataError {
     Api(String),
     /// The market-data API rate-limited the request.
     #[error("market data rate limited: {0}")]
+    RateLimited(String),
+    /// Resolving the API secret from the vault failed.
+    #[error("secret vault failure: {0}")]
+    SecretVault(String),
+}
+
+/// Failures from the [`DividendSource`] port (Phase 7).
+///
+/// Carries only `String` payloads — never an HTTP status or the API key (`§0.3`).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DividendSourceError {
+    /// The dividend API returned a failure.
+    #[error("dividend api failure: {0}")]
+    Api(String),
+    /// The dividend API rate-limited the request.
+    #[error("dividend rate limited: {0}")]
     RateLimited(String),
     /// Resolving the API secret from the vault failed.
     #[error("secret vault failure: {0}")]
@@ -668,6 +867,67 @@ mod tests {
                 .and_then(|json| serde_json::from_str::<ClaimSubject>(&json).ok())
         });
         assert_eq!(round_tripped, subject.ok());
+    }
+
+    #[test]
+    fn dividend_source_kind_round_trips_label() {
+        for kind in [
+            DividendSourceKind::Tiingo,
+            DividendSourceKind::Yahoo,
+            DividendSourceKind::Manual,
+            DividendSourceKind::Mock,
+        ] {
+            assert_eq!(DividendSourceKind::try_from_str(kind.as_str()), Ok(kind));
+        }
+    }
+
+    #[test]
+    fn dividend_source_kind_rejects_unknown_label() {
+        assert!(matches!(
+            DividendSourceKind::try_from_str("alphavantage"),
+            Err(ValidationError::Format {
+                field: "dividend_source",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn dividend_event_serde_round_trips() {
+        let event = Ticker::try_new("AAPL").ok().and_then(|ticker| {
+            let ex_date = NaiveDate::from_ymd_opt(2026, 5, 8)?;
+            let pay_date = NaiveDate::from_ymd_opt(2026, 5, 15)?;
+            Some(DividendEvent {
+                ticker,
+                ex_date,
+                pay_date,
+                amount_per_share: Money::from_minor(25),
+                source: DividendSourceKind::Tiingo,
+            })
+        });
+        let round_tripped = event.as_ref().and_then(|e| {
+            serde_json::to_string(e)
+                .ok()
+                .and_then(|json| serde_json::from_str::<DividendEvent>(&json).ok())
+        });
+        assert_eq!(round_tripped, event);
+    }
+
+    #[test]
+    fn share_provenance_serde_round_trips_each_variant() {
+        let baseline = Utc::now();
+        for provenance in [
+            ShareProvenance::Uploaded,
+            ShareProvenance::DripEstimated {
+                events_applied: 3,
+                baseline_as_of: baseline,
+            },
+        ] {
+            let decoded = serde_json::to_string(&provenance)
+                .ok()
+                .and_then(|s| serde_json::from_str::<ShareProvenance>(&s).ok());
+            assert_eq!(decoded, Some(provenance));
+        }
     }
 
     #[test]

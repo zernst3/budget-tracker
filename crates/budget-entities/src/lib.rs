@@ -13,9 +13,11 @@
 //!   - [`repayment_obligations`] — buffer-draw repayment schedule (SPEC §4.9)
 //!   - [`paycheck_config`] — income setup; one per user (SPEC §4.8)
 //!   - [`webauthn_credentials`] — passkeys / biometric login; one user, many devices (SPEC §5, §9.1; `BUDGET-AUTH-GATE-1`)
-//!   - [`positions`] — investment holdings; shares is a COUNT (AI Portfolio Insights, m0007)
+//!   - [`positions`] — investment holdings; shares is a COUNT (AI Portfolio Insights, m0007); `drip_enabled` + `baseline_as_of` (DRIP, m0008)
 //!   - [`cash_balances`] — labelled cash balances; reserved = buffer (`BUDGET-CASH-1`, m0007)
 //!   - [`review_runs`] — append-only portfolio-review audit log (`SQL-AUDIT-COLUMNS-1`, m0007)
+//!   - [`dividend_events`] — ticker-keyed dividend cache (DRIP, m0008)
+//!   - [`drip_applications`] — append-only DRIP accretion chain (`SQL-AUDIT-COLUMNS-1`, m0008)
 //!
 //! Pure data shape — no business logic, no DTOs, no serde on `Model` (`ENTITIES-2`).
 //! NUMERIC money columns map to `rust_decimal::Decimal` (`BUDGET-MONEY-1`), never to
@@ -25,6 +27,8 @@ pub mod accounts;
 pub mod budgets;
 pub mod cash_balances;
 pub mod categories;
+pub mod dividend_events;
+pub mod drip_applications;
 pub mod funds;
 pub mod months;
 pub mod paycheck_config;

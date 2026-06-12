@@ -404,6 +404,8 @@ mod tests {
             account_type: budget_domain::enums::AccountType::Investment,
             shares: rust_decimal::Decimal::new(10, 0),
             cost_basis: Some(Money::from_minor(150_000)),
+            drip_enabled: false,
+            baseline_as_of: captured_at,
             created_at: captured_at,
             updated_at: captured_at,
         };
@@ -417,6 +419,7 @@ mod tests {
                 as_of: captured_at,
             }),
             market_value: Some(Money::from_minor(180_000)),
+            share_provenance: budget_domain::portfolio::ShareProvenance::Uploaded,
         };
         PortfolioSnapshot {
             user_id: UserId::new(

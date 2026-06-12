@@ -123,6 +123,18 @@ uuid_newtype!(
     /// portfolio-review invocation).
     ReviewRunId
 );
+uuid_newtype!(
+    /// Identifies a cached [`crate::portfolio::DividendEvent`] row in the
+    /// `dividend_events` table (Phase 7 `m0008`). The domain `DividendEvent` value
+    /// is identity-free; this id is the persistence PK supplied at the mapper.
+    DividendEventId
+);
+uuid_newtype!(
+    /// Identifies a [`crate::portfolio::DripApplication`] (one row in a position's
+    /// auditable DRIP accretion chain, Phase 7 `m0008`,
+    /// `BUDGET-ROLLOVER-INTEGRITY-1`).
+    DripApplicationId
+);
 
 #[cfg(test)]
 mod tests {

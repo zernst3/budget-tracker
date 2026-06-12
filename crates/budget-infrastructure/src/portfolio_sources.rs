@@ -197,6 +197,8 @@ mod tests {
             account_type: budget_entities::accounts::AccountType::Investment,
             shares: Decimal::new(10, 0),
             cost_basis: Some(Decimal::new(150_000, 2)),
+            drip_enabled: false,
+            baseline_as_of: fixed_now().into(),
             created_at: fixed_now().into(),
             updated_at: fixed_now().into(),
         }
@@ -211,6 +213,8 @@ mod tests {
             account_type: AccountType::Investment,
             shares: Decimal::new(10, 0),
             cost_basis: Some(Money::from_minor(150_000)),
+            drip_enabled: false,
+            baseline_as_of: fixed_now(),
             created_at: fixed_now(),
             updated_at: fixed_now(),
         }
@@ -257,6 +261,8 @@ mod tests {
             account_type: budget_entities::accounts::AccountType::Investment,
             shares: Decimal::new(10, 0),
             cost_basis: Some(Decimal::new(150_000, 2)),
+            drip_enabled: false,
+            baseline_as_of: fixed_now().into(),
             created_at: fixed_now().into(),
             updated_at: fixed_now().into(),
         };

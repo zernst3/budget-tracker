@@ -71,6 +71,8 @@ pub fn model_to_domain(m: positions::Model) -> Result<Position, MapperError> {
         account_type: account_type_to_domain(m.account_type),
         shares: m.shares,
         cost_basis: m.cost_basis.map(Money::from_decimal),
+        drip_enabled: m.drip_enabled,
+        baseline_as_of: m.baseline_as_of.with_timezone(&Utc),
         created_at: m.created_at.with_timezone(&Utc),
         updated_at: m.updated_at.with_timezone(&Utc),
     })
@@ -89,6 +91,8 @@ pub fn domain_to_active_model(v: &Position) -> positions::ActiveModel {
         account_type: Set(account_type_to_entity(v.account_type)),
         shares: Set(v.shares),
         cost_basis: Set(v.cost_basis.map(|m| m.as_decimal())),
+        drip_enabled: Set(v.drip_enabled),
+        baseline_as_of: Set(v.baseline_as_of.into()),
         created_at: Set(created_at.into()),
         updated_at: Set(updated_at.into()),
     }
@@ -118,6 +122,8 @@ mod tests {
             account_type,
             shares: Decimal::new(10, 0),
             cost_basis,
+            drip_enabled: true,
+            baseline_as_of: ts.into(),
             created_at: ts.into(),
             updated_at: ts.into(),
         }
@@ -137,11 +143,15 @@ mod tests {
         assert_eq!(domain.account_type, AccountType::Investment);
         assert_eq!(domain.cost_basis, Some(Money::from_minor(150_000)));
 
+        // The DRIP fields (m0008) survive the read.
+        assert!(domain.drip_enabled);
+
         // ActiveModel preserves the values going back out.
         let am = domain_to_active_model(&domain);
         assert_eq!(am.ticker, Set("AAPL".to_owned()));
         assert_eq!(am.cost_basis, Set(Some(Decimal::new(150000, 2))));
         assert_eq!(am.id, Set(expected_id));
+        assert_eq!(am.drip_enabled, Set(true));
     }
 
     #[test]

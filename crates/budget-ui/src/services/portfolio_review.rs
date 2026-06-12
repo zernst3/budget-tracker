@@ -327,6 +327,10 @@ pub fn add_position_dto_to_domain(
         account_type,
         shares,
         cost_basis,
+        // A newly-added holding: DRIP off by default (opt-in, §2.7); the baseline
+        // as-of is the add instant (BUDGET-CUTOVER-1).
+        drip_enabled: false,
+        baseline_as_of: now,
         created_at: now,
         updated_at: now,
     })
@@ -1184,7 +1188,8 @@ mod tests {
     // -- Phase 3: snapshot DTO mapping ---------------------------------------
 
     use budget_domain::portfolio::{
-        NetWorth, PortfolioSnapshot, Position, PriceProvenance, PriceQuote, PricedPosition, Ticker,
+        NetWorth, PortfolioSnapshot, Position, PriceProvenance, PriceQuote, PricedPosition,
+        ShareProvenance, Ticker,
     };
 
     fn priced(ticker: &str, shares: i64, mv_cents: Option<i64>, fresh: bool) -> PricedPosition {
@@ -1197,6 +1202,8 @@ mod tests {
             account_type: AccountType::Investment,
             shares: rust_decimal::Decimal::new(shares, 0),
             cost_basis: None,
+            drip_enabled: false,
+            baseline_as_of: now,
             created_at: now,
             updated_at: now,
         };
@@ -1216,6 +1223,7 @@ mod tests {
             position,
             quote,
             market_value: mv_cents.map(Money::from_minor),
+            share_provenance: ShareProvenance::Uploaded,
         }
     }
 

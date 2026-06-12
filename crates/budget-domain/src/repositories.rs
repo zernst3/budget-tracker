@@ -30,6 +30,7 @@ use crate::month::Month;
 use crate::paycheck_config::PaycheckConfig;
 use crate::plaid_item::PlaidItem;
 use crate::portfolio::{CashBalanceSource, Position, PositionSource, ReviewRun};
+use crate::portfolio::{DividendEvent, DripApplication, Ticker};
 use crate::projections::CategorySpent;
 use crate::repayment_obligation::RepaymentObligation;
 use crate::transaction::Transaction;
@@ -613,4 +614,70 @@ pub trait CashBalanceRepository: CashBalanceSource {
     /// # Errors
     /// [`RepositoryError`] on any persistence failure.
     async fn upsert(&self, balance: &crate::portfolio::CashBalance) -> Result<(), RepositoryError>;
+}
+
+/// The `dividend_events` ticker-keyed cache (`REPO-1`, Phase 7 `m0008`).
+///
+/// A dividend is fetched once per ticker and shared across every position holding
+/// it. The cache is keyed `(ticker, pay_date)`; [`upsert_many`] is idempotent on
+/// that key, and [`find_since`] returns the cached events with
+/// `pay_date > since` (chronological), the catch-up engine's read path.
+///
+/// [`upsert_many`]: DividendEventCache::upsert_many
+/// [`find_since`]: DividendEventCache::find_since
+#[async_trait]
+pub trait DividendEventCache: Send + Sync {
+    /// Cached dividend events for `ticker` with `pay_date` strictly after `since`,
+    /// chronological by `pay_date`.
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure.
+    async fn find_since(
+        &self,
+        ticker: &Ticker,
+        since: NaiveDate,
+    ) -> Result<Vec<DividendEvent>, RepositoryError>;
+
+    /// Idempotently store dividend events, keyed by `(ticker, pay_date)` (a
+    /// re-fetch overwrites `amount_per_share`/`source`/`fetched_at` for an
+    /// existing key, never duplicating a row).
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure.
+    async fn upsert_many(&self, events: &[DividendEvent]) -> Result<(), RepositoryError>;
+}
+
+/// Persistence for the [`DripApplication`] auditable chain (`REPO-1`,
+/// `SQL-AUDIT-COLUMNS-1`, Phase 7 `m0008`).
+///
+/// Append-only: the only write is [`apply_if_absent`], which inserts under the
+/// `(position_id, pay_date)` unique guard with `ON CONFLICT DO NOTHING` so a
+/// re-entrant catch-up posts nothing extra (`BUDGET-IDEMPOTENT-MONTH-INIT-1`).
+/// Reads recompute current shares (`baseline + Σ shares_added`,
+/// `BUDGET-ROLLOVER-INTEGRITY-1`).
+///
+/// [`apply_if_absent`]: DripApplicationRepository::apply_if_absent
+#[async_trait]
+pub trait DripApplicationRepository: Send + Sync {
+    /// Insert one application iff no row exists for its `(position_id, pay_date)`
+    /// (the idempotency guard). Returns `true` if a row was inserted, `false` if
+    /// the guard suppressed a duplicate. Enlists in `uow` when supplied.
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure.
+    async fn apply_if_absent(
+        &self,
+        application: &DripApplication,
+        uow: Option<&dyn UnitOfWork>,
+    ) -> Result<bool, RepositoryError>;
+
+    /// All applications for a position, chronological by `pay_date` — the
+    /// auditable chain a current-shares recompute folds over.
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure.
+    async fn list_for_position(
+        &self,
+        position_id: PositionId,
+    ) -> Result<Vec<DripApplication>, RepositoryError>;
 }

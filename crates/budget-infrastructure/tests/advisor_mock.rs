@@ -40,6 +40,8 @@ fn ground_truth_snapshot() -> PortfolioSnapshot {
             account_type: AccountType::Investment,
             shares: Decimal::new(10, 0),
             cost_basis: Some(Money::from_minor(150_000)),
+            drip_enabled: false,
+            baseline_as_of: now,
             created_at: now,
             updated_at: now,
         },
@@ -51,6 +53,7 @@ fn ground_truth_snapshot() -> PortfolioSnapshot {
             as_of: now,
         }),
         market_value: Some(Money::from_minor(180_000)), // $1800
+        share_provenance: budget_domain::portfolio::ShareProvenance::Uploaded,
     };
     PortfolioSnapshot {
         user_id: UserId::generate(),
