@@ -303,6 +303,8 @@ Open `http://localhost:8080` in your browser.
 | `WEBAUTHN_RP_ID` | Optional | `localhost` (default) |
 | `WEBAUTHN_RP_ORIGIN` | Optional | `http://localhost:8080` (default) |
 | `SESSION_SECRET` | Recommended | any 64+ hex chars |
+| `AI_MODE` | Yes (portfolio, offline) | `mock` — mock advisor + market data + dividend source + in-memory vault (zero network, no keys) |
+| `BUDGET_USER_EMAIL` | Yes (portfolio) | the provisioned user's email (e.g. `zach@local.dev`); without it the `/portfolio` routes are not mounted |
 
 Do NOT set `PLAID_CLIENT_ID`, `PLAID_SECRET`, or `KEY_VAULT_URL` for local
 testing. If any of those are present AND `PLAID_MODE=mock` is also set, the
@@ -351,3 +353,78 @@ Verify the PlaidItem row exists:
 ```bash
 psql "$DATABASE_URL" -c "SELECT id, institution_name FROM plaid_items;"
 ```
+
+---
+
+# Stage 2 — Portfolio Insights + DRIP (offline, `AI_MODE=mock`)
+
+Exercise the AI Portfolio Review + real-time/DRIP tracking with **zero network
+and no API keys**. `AI_MODE=mock` swaps in the mock advisor, mock market data,
+and mock dividend source, all behind the same ports the real Gemini/Finnhub/
+Tiingo adapters use — so the firewall, reconciliation, snapshot assembly, DRIP
+accretion, and per-account upsert are all shaken out before any live key.
+
+## Step P1 — Add the portfolio env vars
+
+On top of the Stage-1 environment (Postgres up, user provisioned), add:
+
+```bash
+export AI_MODE=mock                     # mock advisor + market + dividends + in-memory vault
+export BUDGET_USER_EMAIL=zach@local.dev # MUST match the provision-user email, or /portfolio won't mount
+```
+
+> Do NOT set `KEY_VAULT_URL` / `GEMINI_MODEL_IDS` for offline testing — `AI_MODE=mock`
+> takes precedence and logs a loud WARN at startup. (Those are only for the
+> live smoke test in Stage 3.)
+
+Restart the server (`dx serve --package budget-ui` or `cargo run -p budget-server`),
+log in (Stage-1 Step 7), and open `http://localhost:8080/portfolio`.
+
+## Step P2 — Per-account upload (the upsert is the source of truth)
+
+1. Upload positions for **one account** (e.g. account label `Brokerage`):
+   `AAPL, 30` and `VOO, 10` (ticker, shares; optional cost basis).
+2. The positions table renders **grouped by account**, each row showing
+   shares × the mock live price = market value, plus buffer + net worth.
+3. Upload a **second account** (`Roth`: `VTI, 25`). **Verify the Brokerage rows
+   are untouched** — a per-account upload never disturbs another account.
+4. Re-upload `Brokerage` with `AAPL, 30` only (drop VOO). Verify VOO is removed
+   from Brokerage **and Roth is still intact**. This is the §2.7 per-account
+   upsert: it reconciles only the uploaded account.
+
+## Step P3 — DRIP toggle + accretion (idempotent)
+
+5. Toggle the **DRIP checkbox** on a row (e.g. VTI in Roth). It defaults **off**.
+6. Reload `/portfolio`. The mock dividend source feeds fixture dividends, so a
+   DRIP-on position should show a slightly higher **estimated** share count with
+   an **"estimated · N dividends reinvested since last upload"** badge (never
+   shown as a confirmed figure — `BUDGET-AI-1`).
+7. **Reload again** — the share count must NOT keep climbing. DRIP applies each
+   dividend exactly once (idempotent catch-up). This is the key thing to eyeball.
+8. Re-upload that account → the estimate resets to the uploaded baseline, **but
+   the DRIP checkbox stays on** (per-position config persists across uploads).
+9. Toggle DRIP **off** on a position and confirm a fixture dividend lands as
+   investment-account **cash** instead of new shares (net worth still moves; the
+   budget is never touched — `BUDGET-CASH-1`).
+
+## Step P4 — Run Review (the firewall)
+
+10. Click **Run Review**. The mock advisor (default "Verified" mode) returns
+    grounded recommendations; each insight card shows its title, rationale,
+    a **confidence** badge, the numbers it cites, and **validation badges**
+    (Verified / Unverified) per claim, with the standing disclaimer always shown.
+11. Every claim is reconciled against your real (mock) snapshot — confirm no
+    number is presented as fact without a Verified badge. (The deliberately-
+    hallucinated path is covered by the `advisor_mock` integration test; the
+    default local mock shows the happy path.)
+
+## Stage 3 — Live smoke test (your keys, real network) — when ready
+
+Unset `AI_MODE=mock` and provide, in the vault / config: `KEY_VAULT_URL`,
+secrets `gemini-api-key` (+ optional `finnhub-api-key`, `tiingo` key), and
+`GEMINI_MODEL_IDS` (defaults to `gemini-2.5-pro,gemini-2.5-flash`). Then a real
+Run Review calls Gemini, and prices/dividends resolve through Finnhub→Stooq /
+Tiingo→Yahoo. **Heads-up:** the first live call is where the Gemini wire shape
+(JSON-in-text and `usageMetadata` placement) gets confirmed — if it mis-parses,
+it surfaces safely as `MalformedOutput` (audited, never a crash) and is a ~1-line
+`wire.rs` fix. Flag it and it gets patched.
