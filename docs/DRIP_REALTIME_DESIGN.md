@@ -36,7 +36,7 @@ Track investments in **real time** so the only time the user uploads is when the
 4. **DRIP-off dividend → investment-account cash, never budget.** It increases that account's `CashBalance` (`BUDGET-CASH-1`); it does not enter budget-category math. The rare real transfer of that cash into checking is booked by the user as an ordinary identifiable budget line item (out of scope for this feature).
 5. **The AI review reconciles against estimated-current shares**, with the `DripEstimated` provenance surfaced on the snapshot/DTO/UI so nothing estimated is presented as confirmed. (Zach)
 6. **Dividend data source (see §7):** Finnhub dividends is a premium endpoint, so dividends use a separate free chain behind a new `DividendSource` port: **Tiingo (free EOD entitlement) → Yahoo v8 keyless → manual entry**, cached aggressively. Confirm exact tiers/limits at build (`ORCH-TRAINING-CUTOFF-1`).
-7. **Upload is an UPSERT by position identity, never a drop-and-reload.** A position's identity is `(user_id, ticker, account_label)`. On upload: a position present in the upload is **updated** (new confirmed `shares` + `baseline_as_of`, and its DRIP estimate reset); a position **absent** from the upload is **removed** (the holding was fully sold); a position **new** in the upload is **inserted** with `drip_enabled = false`. **Per-position configuration — notably `drip_enabled` — PERSISTS across uploads** for every surviving position. The upload is the source of truth for *which* positions exist and their confirmed share counts; it is NOT a settings wipe. The only true config changes between uploads are: a brand-new holding (insert, default off) or a fully-sold holding (remove). (Zach, 2026-06-12)
+7. **Upload is a PER-ACCOUNT UPSERT, never a drop-and-reload, and never cross-account.** An upload is scoped to ONE account: it carries an `account_label` and reconciles ONLY the positions in that account. A position's identity is `(user_id, ticker, account_label)`. On upload of account A: a position in A present in the upload is **updated** (new confirmed `shares` + `baseline_as_of`, DRIP estimate reset); a position in A **absent** from the upload is **removed** (fully sold); a position **new** in A is **inserted** with `drip_enabled = false`. **Positions in every OTHER account are left completely untouched** — the "absent → remove" sweep is filtered to `account_label = A`. **Per-position configuration — notably `drip_enabled` — PERSISTS across uploads** for surviving positions. The upload is the source of truth for *which* positions exist **in that one account** and their confirmed share counts; it is NOT a settings wipe and NOT a whole-portfolio replace. (Zach, 2026-06-12)
 
 ## 3. The estimation math (exact decimals throughout)
 
@@ -106,13 +106,14 @@ A new app-services use-case, run during snapshot assembly (or app open):
 3. Race-safe and re-entrant (two opens, or a same-day re-open, post nothing extra) — exactly the `BUDGET-IDEMPOTENT-MONTH-INIT-1` guarantee.
 4. Events with `pay_date <= baseline_as_of` are skipped (upload already includes them).
 
-**Upload (re-baseline) — an UPSERT, not a wipe (Decision §2.7):** reconcile the uploaded set against existing positions by identity `(user_id, ticker, account_label)`:
-- **Surviving position** (in both): set `shares = uploaded`, `baseline_as_of = upload_date`; **preserve `drip_enabled`** and any other per-position config; reset the DRIP estimate (prior `drip_applications` are retained for audit but no longer contribute, since current = baseline + applications with `pay_date > baseline_as_of`).
-- **Sold-off position** (existing, absent from upload): remove it.
-- **New position** (in upload, not existing): insert with `drip_enabled = false`.
+**Upload (re-baseline) — a PER-ACCOUNT UPSERT, not a wipe, not cross-account (Decision §2.7):** an upload targets ONE account (it carries an `account_label`). Reconcile the uploaded rows against the existing positions **WHERE `account_label` = the uploaded account** (identity `(user_id, ticker, account_label)`):
+- **Surviving position** (in the uploaded account, present in the file): set `shares = uploaded`, `baseline_as_of = upload_date`; **preserve `drip_enabled`** and any other per-position config; reset the DRIP estimate (prior `drip_applications` retained for audit but no longer contribute, since current = baseline + applications with `pay_date > baseline_as_of`).
+- **Sold-off position** (in the uploaded account, absent from the file): remove it. **This removal sweep is filtered to the uploaded account only.**
+- **New position** (in the file, not existing in that account): insert with `drip_enabled = false`.
+- **Positions in every OTHER account: untouched.** Uploading the Brokerage file must never remove or alter Roth/IRA/etc. positions.
 - A dividend with `pay_date == upload_date` is suppressed (assumed already in the upload).
 
-So an upload changes *which* positions exist and their confirmed baselines, and clears estimates — but never the user's DRIP settings on positions they still hold.
+So an upload changes *which* positions exist **in that one account** and their confirmed baselines, and clears that account's estimates — but never touches other accounts and never wipes the user's DRIP settings on positions they still hold.
 
 ## 7. Dividend-data feasibility (verified 2026-06-12)
 
