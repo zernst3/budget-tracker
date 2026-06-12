@@ -36,6 +36,7 @@ Track investments in **real time** so the only time the user uploads is when the
 4. **DRIP-off dividend → investment-account cash, never budget.** It increases that account's `CashBalance` (`BUDGET-CASH-1`); it does not enter budget-category math. The rare real transfer of that cash into checking is booked by the user as an ordinary identifiable budget line item (out of scope for this feature).
 5. **The AI review reconciles against estimated-current shares**, with the `DripEstimated` provenance surfaced on the snapshot/DTO/UI so nothing estimated is presented as confirmed. (Zach)
 6. **Dividend data source (see §7):** Finnhub dividends is a premium endpoint, so dividends use a separate free chain behind a new `DividendSource` port: **Tiingo (free EOD entitlement) → Yahoo v8 keyless → manual entry**, cached aggressively. Confirm exact tiers/limits at build (`ORCH-TRAINING-CUTOFF-1`).
+7. **Upload is an UPSERT by position identity, never a drop-and-reload.** A position's identity is `(user_id, ticker, account_label)`. On upload: a position present in the upload is **updated** (new confirmed `shares` + `baseline_as_of`, and its DRIP estimate reset); a position **absent** from the upload is **removed** (the holding was fully sold); a position **new** in the upload is **inserted** with `drip_enabled = false`. **Per-position configuration — notably `drip_enabled` — PERSISTS across uploads** for every surviving position. The upload is the source of truth for *which* positions exist and their confirmed share counts; it is NOT a settings wipe. The only true config changes between uploads are: a brand-new holding (insert, default off) or a fully-sold holding (remove). (Zach, 2026-06-12)
 
 ## 3. The estimation math (exact decimals throughout)
 
@@ -60,7 +61,7 @@ cash_added(e)       = e.amount_per_share × shares_held_at(e)       // exact Mon
 ## 4. Data model (migration `m0008_drip_realtime`)
 
 **`positions`** (additive, expand-only):
-- `+ drip_enabled BOOLEAN NOT NULL DEFAULT false` — the per-position, per-account toggle.
+- `+ drip_enabled BOOLEAN NOT NULL DEFAULT false` — the per-position, per-account toggle. **Persists across uploads** for surviving positions (§2.7, §6).
 - `+ baseline_as_of TIMESTAMPTZ NOT NULL` — the as-of date of the current confirmed baseline (set on upload). `shares` is the confirmed baseline (immutable between uploads); current shares are derived.
 
 **`dividend_events`** (NEW — a ticker-keyed cache, shared across positions of the same ticker, so we fetch once):
@@ -105,7 +106,13 @@ A new app-services use-case, run during snapshot assembly (or app open):
 3. Race-safe and re-entrant (two opens, or a same-day re-open, post nothing extra) — exactly the `BUDGET-IDEMPOTENT-MONTH-INIT-1` guarantee.
 4. Events with `pay_date <= baseline_as_of` are skipped (upload already includes them).
 
-**Upload (re-baseline):** sets `positions.shares = uploaded`, `baseline_as_of = upload_date`. Prior `drip_applications` are retained for audit but no longer contribute (current = baseline + applications with `pay_date > baseline_as_of`). A dividend with `pay_date == upload_date` is suppressed.
+**Upload (re-baseline) — an UPSERT, not a wipe (Decision §2.7):** reconcile the uploaded set against existing positions by identity `(user_id, ticker, account_label)`:
+- **Surviving position** (in both): set `shares = uploaded`, `baseline_as_of = upload_date`; **preserve `drip_enabled`** and any other per-position config; reset the DRIP estimate (prior `drip_applications` are retained for audit but no longer contribute, since current = baseline + applications with `pay_date > baseline_as_of`).
+- **Sold-off position** (existing, absent from upload): remove it.
+- **New position** (in upload, not existing): insert with `drip_enabled = false`.
+- A dividend with `pay_date == upload_date` is suppressed (assumed already in the upload).
+
+So an upload changes *which* positions exist and their confirmed baselines, and clears estimates — but never the user's DRIP settings on positions they still hold.
 
 ## 7. Dividend-data feasibility (verified 2026-06-12)
 
@@ -123,7 +130,7 @@ A new app-services use-case, run during snapshot assembly (or app open):
 - **P7.1 — data model + ports.** `m0008` migration, `positions` columns, `dividend_events` + `drip_applications` tables + entities + mappers; domain `DividendEvent`/`ShareProvenance`/`DividendSource` port + error enum. **Pause for sign-off** before building on it.
 - **P7.2 — dividend sources.** `MockDividendSource` + `ManualDividendSource` first; then `TiingoDividendSource` + `YahooDividendSource` + `ChainDividendSource`. Cache wiring. Mock-tested.
 - **P7.3 — the catch-up engine (longest pole).** The idempotent lazy DRIP service + the §3 estimation math (buffer + floor) + DRIP-off→cash, built and tested entirely against mocks. Idempotency/re-entrancy tests; chronological-compounding tests; suppression-on-upload tests.
-- **P7.4 — wire-in + UI.** Provenance into `PortfolioSnapshot`/DTO; the per-position DRIP toggle UI; the "estimated since last upload" badge; re-baseline-on-upload; the AI review reflecting estimated values with labels.
+- **P7.4 — wire-in + UI.** Provenance into `PortfolioSnapshot`/DTO; the positions table **grouped by account**, each row carrying a **DRIP checkbox (default off, toggled inline, persisted, and surviving uploads per §6)**; the "estimated since last upload" badge; the upsert re-baseline-on-upload; the AI review reflecting estimated values with labels.
 - **P7.5 (optional) — delta refinement.** On each upload, record the realized-vs-estimated delta per position to a log so the buffer/rounding can be tuned over time toward consistency (Decision §2.1).
 
 ## 10. Open items requiring confirmation (`ORCH-TRAINING-CUTOFF-1`)
