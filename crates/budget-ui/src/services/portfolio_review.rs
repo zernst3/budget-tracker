@@ -115,6 +115,16 @@ pub struct PricedPositionDto {
     pub pct_of_portfolio: Option<String>,
     /// `true` when the quote is absent/old (degraded position).
     pub is_stale: bool,
+    /// `true` when the share count is a DRIP estimate accreted since the last
+    /// upload (not the confirmed baseline). Drives the "estimated since last
+    /// upload" badge so nothing estimated renders as confirmed (`BUDGET-AI-1`,
+    /// §2.5/§8).
+    pub shares_estimated: bool,
+    /// A pre-rendered HUMAN badge label when the shares are estimated (e.g.
+    /// `"estimated · 2 dividends since last upload"`); `None` when the count is
+    /// the confirmed `Uploaded` baseline. The raw `ShareProvenance` discriminant
+    /// never crosses to the client (`RUST-DIOXUS-10`).
+    pub estimated_badge: Option<String>,
 }
 
 /// Aggregate net worth, all fields decimal strings.
@@ -401,13 +411,46 @@ fn provenance_to_string(p: &budget_domain::portfolio::PriceProvenance) -> String
     }
 }
 
+/// Render a [`ShareProvenance`](budget_domain::portfolio::ShareProvenance) to the
+/// `(shares_estimated, estimated_badge)` pair for the DTO (`RUST-DIOXUS-10`,
+/// §2.5/§8). `Uploaded` → `(false, None)`; `DripEstimated` → `(true, Some(human
+/// badge))`. The raw discriminant + the raw `events_applied`/`baseline_as_of`
+/// internals never cross to the client; only the human string does.
+#[cfg(feature = "server")]
+#[must_use]
+fn share_provenance_to_badge(
+    provenance: &budget_domain::portfolio::ShareProvenance,
+) -> (bool, Option<String>) {
+    use budget_domain::portfolio::ShareProvenance;
+    match provenance {
+        ShareProvenance::Uploaded => (false, None),
+        ShareProvenance::DripEstimated {
+            events_applied,
+            baseline_as_of,
+        } => {
+            let plural = if *events_applied == 1 {
+                "dividend"
+            } else {
+                "dividends"
+            };
+            let badge = format!(
+                "estimated · {events_applied} {plural} reinvested since last upload ({})",
+                baseline_as_of.format("%Y-%m-%d")
+            );
+            (true, Some(badge))
+        }
+    }
+}
+
 /// Render a [`PricedPosition`](budget_domain::portfolio::PricedPosition) to a
 /// [`PricedPositionDto`].
 ///
 /// `pct_of_portfolio` is `market_value / total_invested` as a PERCENT (ratio ×
 /// 100) rounded to 1 dp; `None` when the position is unresolved or
 /// `total_invested` is zero. `is_stale` is true when the quote is absent or older
-/// than [`STALE_AFTER_HOURS`].
+/// than [`STALE_AFTER_HOURS`]. `shares_estimated`/`estimated_badge` carry the
+/// DRIP-provenance label so nothing estimated renders as confirmed
+/// (`BUDGET-AI-1`).
 #[cfg(feature = "server")]
 #[must_use]
 fn priced_position_to_dto(
@@ -430,6 +473,8 @@ fn priced_position_to_dto(
         Some(q) => (now - q.as_of).num_hours() >= STALE_AFTER_HOURS,
     };
 
+    let (shares_estimated, estimated_badge) = share_provenance_to_badge(&pp.share_provenance);
+
     PricedPositionDto {
         ticker: pp.position.ticker.as_str().to_owned(),
         account_label: pp.position.account_label.clone(),
@@ -444,6 +489,8 @@ fn priced_position_to_dto(
         market_value: pp.market_value.map(|m| m.as_decimal().to_string()),
         pct_of_portfolio,
         is_stale,
+        shares_estimated,
+        estimated_badge,
     }
 }
 
@@ -1287,6 +1334,63 @@ mod tests {
         let snap = snapshot(vec![priced("AAPL", 10, Some(0), true)], 0);
         let dto = snapshot_to_dto(&snap);
         assert_eq!(dto.positions[0].pct_of_portfolio, None);
+    }
+
+    // -- Phase 7.4: provenance badge (RUST-DIOXUS-10 boundary) ----------------
+
+    #[test]
+    fn uploaded_provenance_has_no_estimated_badge() {
+        let (estimated, badge) = share_provenance_to_badge(&ShareProvenance::Uploaded);
+        assert!(!estimated);
+        assert_eq!(badge, None);
+    }
+
+    #[test]
+    fn drip_estimated_provenance_renders_a_human_badge() {
+        // The raw discriminant + events_applied/baseline never cross; only the
+        // human string does (RUST-DIOXUS-10).
+        let badge = share_provenance_to_badge(&ShareProvenance::DripEstimated {
+            events_applied: 2,
+            baseline_as_of: chrono::DateTime::parse_from_rfc3339("2026-01-15T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        });
+        assert!(badge.0, "shares_estimated is true");
+        let label = badge.1.unwrap();
+        assert!(label.contains("estimated"));
+        assert!(label.contains('2'));
+        assert!(label.contains("dividends"), "plural for >1 event");
+        assert!(label.contains("2026-01-15"));
+    }
+
+    #[test]
+    fn drip_estimated_singular_dividend_label() {
+        let badge = share_provenance_to_badge(&ShareProvenance::DripEstimated {
+            events_applied: 1,
+            baseline_as_of: Utc::now(),
+        });
+        let label = badge.1.unwrap();
+        assert!(label.contains("1 dividend "), "singular for one event");
+    }
+
+    #[test]
+    fn snapshot_dto_carries_estimated_badge_through_to_priced_row() {
+        // An end-to-end check that the DRIP label survives snapshot -> DTO.
+        let mut pp = priced("AAPL", 10, Some(180_000), true);
+        pp.share_provenance = ShareProvenance::DripEstimated {
+            events_applied: 3,
+            baseline_as_of: Utc::now(),
+        };
+        let snap = snapshot(vec![pp], 180_000);
+        let dto = snapshot_to_dto(&snap);
+        assert!(dto.positions[0].shares_estimated);
+        assert!(
+            dto.positions[0]
+                .estimated_badge
+                .as_ref()
+                .unwrap()
+                .contains("3 dividends")
+        );
     }
 
     // -- Phase 6: review_run_to_dto + AI config (ORCH-NEW-PATH-TESTS-1) -------

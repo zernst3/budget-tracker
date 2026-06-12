@@ -301,6 +301,10 @@ struct PricedRow {
     market_value: String,
     pct: String,
     stale: bool,
+    /// The server-rendered "estimated since last upload" badge text, or empty for
+    /// a confirmed (`Uploaded`) baseline (`BUDGET-AI-1`, §2.5/§8). Display-only;
+    /// the raw provenance never crossed the wire (`RUST-DIOXUS-10`).
+    estimated_badge: String,
 }
 
 impl PricedRow {
@@ -317,6 +321,9 @@ impl PricedRow {
                 .clone()
                 .map_or_else(dash, |v| format!("{v}%")),
             stale: p.is_stale,
+            // The server already rendered the human badge (or None for a confirmed
+            // baseline); render it verbatim or empty.
+            estimated_badge: p.estimated_badge.clone().unwrap_or_default(),
         }
     }
 }
@@ -362,6 +369,16 @@ fn priced_columns() -> Vec<ColumnDef<PricedRow>> {
             })
         })
         .initial_width(90.0),
+        // The DRIP "estimated since last upload" badge (§2.5/§8). Empty for a
+        // confirmed baseline; the server rendered the human text (RUST-DIOXUS-10).
+        ColumnDef::new(ColumnId("estimated"), "Share count", |r: &PricedRow| {
+            CellValue::Text(if r.estimated_badge.is_empty() {
+                "confirmed".to_owned()
+            } else {
+                r.estimated_badge.clone()
+            })
+        })
+        .initial_width(280.0),
     ]
 }
 
@@ -514,6 +531,8 @@ mod tests {
             market_value: mv.map(ToOwned::to_owned),
             pct_of_portfolio: mv.map(|_| "41.9".to_owned()),
             is_stale: stale,
+            shares_estimated: false,
+            estimated_badge: None,
         }
     }
 
@@ -523,11 +542,26 @@ mod tests {
         assert_eq!(resolved.market_value, "1800.00");
         assert_eq!(resolved.pct, "41.9%");
         assert!(!resolved.stale);
+        // A confirmed baseline carries no estimated badge.
+        assert_eq!(resolved.estimated_badge, "");
 
         let unresolved = PricedRow::from_dto(&priced_dto("NVDA", None, true));
         assert_eq!(unresolved.price, "—");
         assert_eq!(unresolved.market_value, "—");
         assert_eq!(unresolved.pct, "—");
         assert!(unresolved.stale);
+    }
+
+    #[test]
+    fn priced_row_carries_estimated_badge_verbatim() {
+        let mut dto = priced_dto("AAPL", Some("1800.00"), false);
+        dto.shares_estimated = true;
+        dto.estimated_badge =
+            Some("estimated · 2 dividends reinvested since last upload".to_owned());
+        let row = PricedRow::from_dto(&dto);
+        assert_eq!(
+            row.estimated_badge,
+            "estimated · 2 dividends reinvested since last upload"
+        );
     }
 }
