@@ -599,6 +599,53 @@ pub trait PositionRepository: PositionSource {
     /// # Errors
     /// [`RepositoryError`] on any persistence failure.
     async fn delete(&self, user_id: UserId, id: PositionId) -> Result<(), RepositoryError>;
+
+    /// Reconcile an upload of ONE account's holdings as a PER-ACCOUNT UPSERT, in a
+    /// single transaction (`docs/DRIP_REALTIME_DESIGN.md §2.7/§6`,
+    /// `ARCH-EXPLICIT-TX-1`, `RUST-SEAORM-INTRA-AGGREGATE-TX-1`).
+    ///
+    /// Identity is `(user_id, ticker, account_label)`. Scoped to the single
+    /// `account_label`: against the existing positions in THAT account only,
+    /// - a position present in `uploaded` is UPDATED (new `shares` + `cost_basis`,
+    ///   `baseline_as_of = baseline`; **`drip_enabled` is PRESERVED**; the DRIP
+    ///   estimate resets because current shares derive from applications with
+    ///   `pay_date > baseline_as_of`, §6);
+    /// - a position ABSENT from `uploaded` is REMOVED (sold off) — **the removal
+    ///   sweep is filtered to `account_label`**, so other accounts are never
+    ///   touched;
+    /// - a position NEW to the account is INSERTED with `drip_enabled = false`
+    ///   (opt-in, §2.7), `account_type`, and `baseline_as_of = baseline`.
+    ///
+    /// Positions in every OTHER account are left completely untouched. The whole
+    /// reconcile runs atomically inside the repository's own transaction
+    /// (intra-aggregate atomicity, `RUST-SEAORM-INTRA-AGGREGATE-TX-1`), so a
+    /// partial upload can never leave the account half-reconciled.
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure (the transaction rolls back).
+    async fn upsert_account(
+        &self,
+        user_id: UserId,
+        account_label: &str,
+        account_type: crate::enums::AccountType,
+        uploaded: &[crate::portfolio::UploadedPosition],
+        baseline: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), RepositoryError>;
+
+    /// Set ONLY the `drip_enabled` flag on a user's position (`§2.7`, the inline
+    /// DRIP toggle). A targeted single-column update so it touches neither the
+    /// `shares` baseline nor `baseline_as_of` (it is per-position config, not a
+    /// re-baseline) and therefore SURVIVES uploads. `user_id`-scoped
+    /// (`SPEC §9.1` defense in depth).
+    ///
+    /// # Errors
+    /// [`RepositoryError`] on any persistence failure.
+    async fn set_drip_enabled(
+        &self,
+        user_id: UserId,
+        id: PositionId,
+        enabled: bool,
+    ) -> Result<(), RepositoryError>;
 }
 
 /// Persistence for the [`crate::portfolio::CashBalance`] aggregate (`REPO-1`,

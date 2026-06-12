@@ -29,7 +29,9 @@ use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 
 use budget_domain::RepositoryError;
 use budget_domain::ids::{PositionId, UserId};
-use budget_domain::portfolio::{CashBalance, CashBalanceSource, Position, PositionSource};
+use budget_domain::portfolio::{
+    CashBalance, CashBalanceSource, Position, PositionSource, UploadedPosition,
+};
 use budget_domain::repositories::{CashBalanceRepository, PositionRepository};
 
 use budget_entities::{cash_balances, positions};
@@ -105,6 +107,197 @@ impl PositionRepository for ManualPositionSource {
             .await
             .map_err(crate::error::map_db_err)?;
         Ok(())
+    }
+
+    async fn set_drip_enabled(
+        &self,
+        user_id: UserId,
+        id: PositionId,
+        enabled: bool,
+    ) -> Result<(), RepositoryError> {
+        use sea_orm::sea_query::Expr;
+        // Targeted single-column update: set ONLY `drip_enabled` (+ `updated_at`),
+        // user_id-scoped (SPEC §9.1). Leaves `shares`/`baseline_as_of` untouched so
+        // the toggle is per-position config that survives uploads (§2.7).
+        positions::Entity::update_many()
+            .col_expr(positions::Column::DripEnabled, Expr::value(enabled))
+            .col_expr(
+                positions::Column::UpdatedAt,
+                Expr::value(chrono::Utc::now()),
+            )
+            .filter(positions::Column::Id.eq(id.value()))
+            .filter(positions::Column::UserId.eq(user_id.value()))
+            .exec(&self.db)
+            .await
+            .map_err(crate::error::map_db_err)?;
+        Ok(())
+    }
+
+    async fn upsert_account(
+        &self,
+        user_id: UserId,
+        account_label: &str,
+        account_type: budget_domain::enums::AccountType,
+        uploaded: &[UploadedPosition],
+        baseline: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), RepositoryError> {
+        use sea_orm::TransactionTrait;
+
+        // Snapshot the inputs into owned values so the transaction closure (which
+        // must be `'static + Send`) can capture them.
+        let user_uuid = user_id.value();
+        let label = account_label.to_owned();
+        let uploaded: Vec<UploadedPosition> = uploaded.to_vec();
+
+        // The whole per-account reconcile runs in ONE transaction so a partial
+        // upload can never leave the account half-reconciled
+        // (RUST-SEAORM-INTRA-AGGREGATE-TX-1, ARCH-EXPLICIT-TX-1). On any error the
+        // transaction rolls back.
+        self.db
+            .transaction::<_, (), sea_orm::DbErr>(move |tx| {
+                Box::pin(async move {
+                    // 1. Load the existing positions IN THIS ACCOUNT ONLY. Every
+                    // read + write below is filtered to `(user_id, account_label)`,
+                    // so positions in other accounts are never observed or touched.
+                    let existing_models = positions::Entity::find()
+                        .filter(positions::Column::UserId.eq(user_uuid))
+                        .filter(positions::Column::AccountLabel.eq(label.clone()))
+                        .all(tx)
+                        .await?;
+                    let existing: Vec<Position> = existing_models
+                        .into_iter()
+                        .map(|m| {
+                            let ticker = m.ticker.clone();
+                            positions_mapper::model_to_domain(m).map_err(|e| {
+                                sea_orm::DbErr::Custom(format!(
+                                    "corrupt stored position '{ticker}': {e}"
+                                ))
+                            })
+                        })
+                        .collect::<Result<_, _>>()?;
+
+                    // 2. The PURE reconcile decision (account-scoped removal sweep +
+                    // re-baseline-preserving-drip + new-insert-DRIP-off). Unit-tested
+                    // directly below; the transaction only EXECUTES the plan.
+                    let plan = plan_account_upsert(
+                        &existing,
+                        user_id,
+                        &label,
+                        account_type,
+                        &uploaded,
+                        baseline,
+                    );
+
+                    // 3a. Removal sweep — every id here came from the account-scoped
+                    // `existing`, so the sweep can never reach another account (§2.7).
+                    for id in plan.deletes {
+                        positions::Entity::delete_by_id(id.value()).exec(tx).await?;
+                    }
+                    // 3b. Updates (survivors, drip_enabled preserved) + inserts (new,
+                    // DRIP-off), each through the single `domain_to_active_model`
+                    // mapper (RUST-MAPPER-1).
+                    for position in plan.updates {
+                        let active = positions_mapper::domain_to_active_model(&position);
+                        positions::Entity::update(active).exec(tx).await?;
+                    }
+                    for position in plan.inserts {
+                        let active = positions_mapper::domain_to_active_model(&position);
+                        positions::Entity::insert(active)
+                            .exec_without_returning(tx)
+                            .await?;
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(|e| crate::error::map_db_err(map_tx_err(e)))?;
+        Ok(())
+    }
+}
+
+/// The pure reconcile decision for a per-account upload upsert
+/// (`docs/DRIP_REALTIME_DESIGN.md §2.7/§6`). Separated from the I/O so the
+/// account-scoping + `drip_enabled`-preservation invariants are unit-testable
+/// without a database.
+///
+/// `existing` MUST already be scoped to the single uploaded account
+/// (`(user_id, account_label)`); the planner never reaches beyond it. Returns the
+/// ids to delete (sold-off survivors), the survivor rows to update (re-baselined,
+/// `drip_enabled` preserved), and the new rows to insert (`drip_enabled = false`).
+struct AccountUpsertPlan {
+    deletes: Vec<PositionId>,
+    updates: Vec<Position>,
+    inserts: Vec<Position>,
+}
+
+fn plan_account_upsert(
+    existing: &[Position],
+    user_id: UserId,
+    account_label: &str,
+    account_type: budget_domain::enums::AccountType,
+    uploaded: &[UploadedPosition],
+    baseline: chrono::DateTime<chrono::Utc>,
+) -> AccountUpsertPlan {
+    use std::collections::HashSet;
+
+    let uploaded_tickers: HashSet<&str> = uploaded.iter().map(|u| u.ticker.as_str()).collect();
+
+    // Removal sweep: existing rows whose ticker is absent from the upload are sold
+    // off. `existing` is already account-scoped, so this never touches another
+    // account.
+    let deletes: Vec<PositionId> = existing
+        .iter()
+        .filter(|p| !uploaded_tickers.contains(p.ticker.as_str()))
+        .map(|p| p.id)
+        .collect();
+
+    let mut updates = Vec::new();
+    let mut inserts = Vec::new();
+    for u in uploaded {
+        match existing.iter().find(|p| p.ticker == u.ticker) {
+            // Surviving position: re-baseline. PRESERVE `id`, `created_at`,
+            // `account_type`, and `drip_enabled` (per-position config persists,
+            // §2.7); only `shares`/`cost_basis`/`baseline_as_of` move. The DRIP
+            // estimate resets because current shares derive from applications with
+            // `pay_date > baseline_as_of` (§6).
+            Some(prior) => updates.push(Position {
+                shares: u.shares,
+                cost_basis: u.cost_basis,
+                baseline_as_of: baseline,
+                updated_at: baseline,
+                ..prior.clone()
+            }),
+            // New holding in this account: insert DRIP-off (opt-in, §2.7).
+            None => inserts.push(Position {
+                id: PositionId::new(uuid::Uuid::new_v4()),
+                user_id,
+                ticker: u.ticker.clone(),
+                account_label: account_label.to_owned(),
+                account_type,
+                shares: u.shares,
+                cost_basis: u.cost_basis,
+                drip_enabled: false,
+                baseline_as_of: baseline,
+                created_at: baseline,
+                updated_at: baseline,
+            }),
+        }
+    }
+
+    AccountUpsertPlan {
+        deletes,
+        updates,
+        inserts,
+    }
+}
+
+/// Flatten a `SeaORM` [`TransactionError`] into a plain [`DbErr`] so the existing
+/// [`map_db_err`](crate::error::map_db_err) boundary can translate it.
+fn map_tx_err(e: sea_orm::TransactionError<sea_orm::DbErr>) -> sea_orm::DbErr {
+    match e {
+        sea_orm::TransactionError::Connection(db) | sea_orm::TransactionError::Transaction(db) => {
+            db
+        }
     }
 }
 
@@ -364,5 +557,124 @@ mod tests {
             reserved: false,
         };
         assert!(repo.upsert(&balance).await.is_ok());
+    }
+
+    // -- Per-account upsert planner (§2.7/§6, ORCH-NEW-PATH-TESTS-1) ----------
+
+    /// A domain position in an explicit account, with an explicit ticker + drip.
+    fn pos_in(ticker: &str, account: &str, shares: i64, drip: bool) -> Position {
+        Position {
+            id: PositionId::generate(),
+            user_id: UserId::generate(),
+            ticker: Ticker::try_new(ticker).unwrap(),
+            account_label: account.to_owned(),
+            account_type: AccountType::Investment,
+            shares: Decimal::new(shares, 0),
+            cost_basis: None,
+            drip_enabled: drip,
+            baseline_as_of: fixed_now(),
+            created_at: fixed_now(),
+            updated_at: fixed_now(),
+        }
+    }
+
+    fn uploaded(ticker: &str, shares: i64) -> UploadedPosition {
+        UploadedPosition {
+            ticker: Ticker::try_new(ticker).unwrap(),
+            shares: Decimal::new(shares, 0),
+            cost_basis: None,
+        }
+    }
+
+    #[test]
+    fn plan_preserves_drip_on_a_survivor_and_rebaselines_it() {
+        // Existing Brokerage AAPL (DRIP ON), 10 shares. Upload re-confirms AAPL at
+        // 12 shares: the survivor is UPDATED, drip_enabled PRESERVED, shares +
+        // baseline moved.
+        let user = UserId::generate();
+        let later = Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
+        let existing = vec![pos_in("AAPL", "Brokerage", 10, true)];
+        let plan = plan_account_upsert(
+            &existing,
+            user,
+            "Brokerage",
+            AccountType::Investment,
+            &[uploaded("AAPL", 12)],
+            later,
+        );
+        assert!(plan.deletes.is_empty());
+        assert!(plan.inserts.is_empty());
+        assert_eq!(plan.updates.len(), 1);
+        let updated = &plan.updates[0];
+        assert!(
+            updated.drip_enabled,
+            "drip_enabled is PRESERVED across upload"
+        );
+        assert_eq!(updated.shares, Decimal::new(12, 0), "re-baselined shares");
+        assert_eq!(
+            updated.baseline_as_of, later,
+            "baseline moved to upload date"
+        );
+        assert_eq!(
+            updated.id, existing[0].id,
+            "row identity preserved (update)"
+        );
+    }
+
+    #[test]
+    fn plan_removes_sold_off_and_inserts_new_drip_off() {
+        // Existing Brokerage {AAPL, MSFT}. Upload {AAPL, NVDA}: MSFT sold off
+        // (delete), AAPL survives (update), NVDA new (insert DRIP-off).
+        let user = UserId::generate();
+        let aapl = pos_in("AAPL", "Brokerage", 10, true);
+        let msft = pos_in("MSFT", "Brokerage", 5, false);
+        let existing = vec![aapl.clone(), msft.clone()];
+        let plan = plan_account_upsert(
+            &existing,
+            user,
+            "Brokerage",
+            AccountType::Investment,
+            &[uploaded("AAPL", 10), uploaded("NVDA", 3)],
+            fixed_now(),
+        );
+        assert_eq!(plan.deletes, vec![msft.id], "MSFT (absent) is swept");
+        assert_eq!(plan.updates.len(), 1);
+        assert_eq!(plan.updates[0].ticker.as_str(), "AAPL");
+        assert_eq!(plan.inserts.len(), 1);
+        let nvda = &plan.inserts[0];
+        assert_eq!(nvda.ticker.as_str(), "NVDA");
+        assert!(
+            !nvda.drip_enabled,
+            "a new holding is DRIP-off by default (§2.7)"
+        );
+        assert_eq!(nvda.account_label, "Brokerage");
+    }
+
+    #[test]
+    fn plan_only_operates_on_the_account_scoped_existing_rows() {
+        // The repo passes `existing` already filtered to the uploaded account, so
+        // the planner — and therefore the deletes — can ONLY reference that
+        // account. Feeding ONLY account-A rows, uploading account A with an empty
+        // payload sweeps exactly account A's rows and produces no insert/update.
+        // (Cross-account isolation is additionally proven end-to-end by the
+        // DATABASE_URL-gated live test.)
+        let user = UserId::generate();
+        let a1 = pos_in("AAPL", "Brokerage", 10, true);
+        let a2 = pos_in("MSFT", "Brokerage", 5, false);
+        let existing = vec![a1.clone(), a2.clone()];
+        let plan = plan_account_upsert(
+            &existing,
+            user,
+            "Brokerage",
+            AccountType::Investment,
+            &[],
+            fixed_now(),
+        );
+        // Both Brokerage rows swept; nothing else.
+        assert_eq!(plan.deletes.len(), 2);
+        assert!(plan.deletes.contains(&a1.id));
+        assert!(plan.deletes.contains(&a2.id));
+        assert!(plan.updates.is_empty());
+        assert!(plan.inserts.is_empty());
     }
 }

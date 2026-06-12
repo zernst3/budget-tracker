@@ -353,3 +353,101 @@ async fn unit_of_work_rolls_back_on_closure_error() {
         "committed user must be present"
     );
 }
+
+/// The per-account upload upsert (§2.7/§6) reconciles ONLY the uploaded account
+/// and leaves every OTHER account — including its `drip_enabled` config —
+/// completely untouched. This is the correctness-critical guarantee of the whole
+/// upload model: uploading the Brokerage file must never delete Roth/IRA
+/// positions.
+#[tokio::test]
+async fn upsert_account_leaves_other_accounts_untouched() {
+    use budget_domain::enums::AccountType;
+    use budget_domain::ids::PositionId;
+    use budget_domain::portfolio::{Position, PositionSource, Ticker, UploadedPosition};
+    use budget_domain::repositories::PositionRepository;
+    use budget_infrastructure::ManualPositionSource;
+    use rust_decimal::Decimal;
+
+    let Some(url) = setup().await else {
+        eprintln!("DATABASE_URL unset — skipping live per-account upsert test");
+        return;
+    };
+
+    // Persist the owning user (positions FK -> users).
+    let user_id = UserId::generate();
+    let users = PostgresUserRepository::new(connect_fresh(&url).await);
+    users
+        .save(&sample_user(user_id), None)
+        .await
+        .expect("save user");
+
+    let positions = ManualPositionSource::new(connect_fresh(&url).await);
+    let now = Utc::now();
+    let mk = |ticker: &str, account: &str, shares: i64, drip: bool| Position {
+        id: PositionId::generate(),
+        user_id,
+        ticker: Ticker::try_new(ticker).unwrap(),
+        account_label: account.to_owned(),
+        account_type: AccountType::Investment,
+        shares: Decimal::new(shares, 0),
+        cost_basis: None,
+        drip_enabled: drip,
+        baseline_as_of: now,
+        created_at: now,
+        updated_at: now,
+    };
+
+    // Seed two accounts: Brokerage {AAPL} and Roth {VTI (DRIP ON), SCHD}.
+    positions
+        .insert(&mk("AAPL", "Brokerage", 10, false))
+        .await
+        .unwrap();
+    let roth_vti = mk("VTI", "Roth", 20, true);
+    let roth_schd = mk("SCHD", "Roth", 30, false);
+    positions.insert(&roth_vti).await.unwrap();
+    positions.insert(&roth_schd).await.unwrap();
+
+    // Upload the BROKERAGE account only: drop AAPL, add MSFT. Roth must be
+    // untouched even though SCHD/VTI are absent from this payload.
+    let upload = vec![UploadedPosition {
+        ticker: Ticker::try_new("MSFT").unwrap(),
+        shares: Decimal::new(7, 0),
+        cost_basis: None,
+    }];
+    positions
+        .upsert_account(
+            user_id,
+            "Brokerage",
+            AccountType::Investment,
+            &upload,
+            Utc::now(),
+        )
+        .await
+        .expect("per-account upsert");
+
+    let all = positions.positions_for_user(user_id).await.expect("reload");
+
+    // Brokerage now holds exactly MSFT (AAPL sold off, MSFT inserted).
+    let brokerage: Vec<_> = all
+        .iter()
+        .filter(|p| p.account_label == "Brokerage")
+        .collect();
+    assert_eq!(brokerage.len(), 1, "Brokerage reconciled to the upload");
+    assert_eq!(brokerage[0].ticker.as_str(), "MSFT");
+
+    // Roth is COMPLETELY untouched: both positions survive with their original
+    // drip_enabled flags (VTI still DRIP ON).
+    let roth: Vec<_> = all.iter().filter(|p| p.account_label == "Roth").collect();
+    assert_eq!(roth.len(), 2, "uploading Brokerage never touched Roth");
+    let vti = roth
+        .iter()
+        .find(|p| p.ticker.as_str() == "VTI")
+        .expect("VTI survives");
+    assert!(vti.drip_enabled, "Roth VTI's DRIP flag is unchanged");
+    assert_eq!(vti.shares, Decimal::new(20, 0), "Roth VTI shares unchanged");
+    let schd = roth
+        .iter()
+        .find(|p| p.ticker.as_str() == "SCHD")
+        .expect("SCHD survives");
+    assert!(!schd.drip_enabled);
+}

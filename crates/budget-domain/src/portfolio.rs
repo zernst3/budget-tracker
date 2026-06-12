@@ -312,6 +312,27 @@ pub struct Position {
     pub updated_at: DateTime<Utc>,
 }
 
+/// One incoming holding in a per-account upload upsert (`docs/DRIP_REALTIME_DESIGN.md
+/// §2.7/§6`).
+///
+/// An upload is scoped to ONE account and carries the confirmed share count (and
+/// optional cost basis) per ticker IN THAT ACCOUNT. The repository reconciles
+/// these against the existing positions WHERE `account_label = the uploaded
+/// account` (identity `(user_id, ticker, account_label)`): surviving positions
+/// are re-baselined (preserving `drip_enabled`), absent ones removed, new ones
+/// inserted with `drip_enabled = false`. Positions in OTHER accounts are never
+/// touched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadedPosition {
+    /// The validated stock symbol.
+    pub ticker: Ticker,
+    /// The confirmed share count (the new baseline) — a COUNT, not money
+    /// (`BUDGET-MONEY-1`).
+    pub shares: Decimal,
+    /// Optional cost basis for the holding.
+    pub cost_basis: Option<Money>,
+}
+
 // ===========================================================================
 // CashBalance
 // ===========================================================================

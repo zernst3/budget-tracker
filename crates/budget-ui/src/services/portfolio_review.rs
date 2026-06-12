@@ -60,6 +60,9 @@ pub struct PositionDto {
     pub shares: String,
     /// Optional cost basis as a decimal string; `None` if unset.
     pub cost_basis: Option<String>,
+    /// The per-position DRIP toggle (Phase 7, §2.7). Drives the inline checkbox;
+    /// persists across uploads for surviving positions.
+    pub drip_enabled: bool,
 }
 
 /// The add/edit position form payload.
@@ -75,6 +78,32 @@ pub struct AddPositionDto {
     pub shares: String,
     /// Optional cost basis as a decimal string.
     pub cost_basis: Option<String>,
+}
+
+/// One incoming holding in a per-account upload (`{ticker, shares, cost_basis?}`,
+/// §2.7/§6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UploadedPositionDto {
+    /// The ticker symbol (re-validated server-side via `Ticker::try_new`).
+    pub ticker: String,
+    /// Share count as a decimal string (a COUNT, not money — `BUDGET-MONEY-1`).
+    pub shares: String,
+    /// Optional cost basis as a decimal string.
+    pub cost_basis: Option<String>,
+}
+
+/// The per-account upload payload (`§2.7/§6`): an `account_label` + the holdings
+/// in that ONE account. The server upserts these scoped to that account only —
+/// other accounts are never touched, and surviving positions keep their
+/// `drip_enabled` config.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountUploadDto {
+    /// The single account this upload reconciles (e.g. `"Brokerage"`).
+    pub account_label: String,
+    /// The account type as a snake_case string (applied to NEW holdings).
+    pub account_type: String,
+    /// The holdings in this account (the confirmed baseline).
+    pub positions: Vec<UploadedPositionDto>,
 }
 
 /// A cash balance, for the read/write balances surface.
@@ -297,6 +326,7 @@ pub fn position_to_dto(p: &budget_domain::portfolio::Position) -> PositionDto {
         account_type: account_type_to_string(p.account_type).to_owned(),
         shares: p.shares.to_string(),
         cost_basis: p.cost_basis.map(|m| m.as_decimal().to_string()),
+        drip_enabled: p.drip_enabled,
     }
 }
 
@@ -343,6 +373,36 @@ pub fn add_position_dto_to_domain(
         baseline_as_of: now,
         created_at: now,
         updated_at: now,
+    })
+}
+
+/// Parse one [`UploadedPositionDto`] into a domain
+/// [`UploadedPosition`](budget_domain::portfolio::UploadedPosition).
+///
+/// # Errors
+/// Returns a human error string when the ticker fails validation or
+/// `shares`/`cost_basis` fail to parse as a decimal.
+#[cfg(feature = "server")]
+pub fn uploaded_dto_to_domain(
+    input: &UploadedPositionDto,
+) -> Result<budget_domain::portfolio::UploadedPosition, String> {
+    use budget_domain::money::Money;
+    use budget_domain::portfolio::{Ticker, UploadedPosition};
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+
+    let ticker = Ticker::try_new(&input.ticker).map_err(|e| e.to_string())?;
+    let shares = Decimal::from_str(input.shares.trim())
+        .map_err(|e| format!("invalid shares '{}': {e}", input.shares))?;
+    let cost_basis = match &input.cost_basis {
+        None => None,
+        Some(s) if s.trim().is_empty() => None,
+        Some(s) => Some(Money::try_parse("cost_basis", s).map_err(|e| e.to_string())?),
+    };
+    Ok(UploadedPosition {
+        ticker,
+        shares,
+        cost_basis,
     })
 }
 
@@ -900,6 +960,94 @@ pub async fn delete_position(id: Uuid) -> Result<(), ServerFnError> {
     Ok(())
 }
 
+/// Upload (PER-ACCOUNT UPSERT) the holdings for ONE account (`§2.7/§6`,
+/// `BUDGET-AUTH-GATE-1`). Reconciles the positions IN THE GIVEN ACCOUNT ONLY in a
+/// single transaction (`ARCH-EXPLICIT-TX-1`): re-baseline survivors (preserving
+/// `drip_enabled`), remove sold-off holdings (sweep scoped to the account),
+/// insert new holdings DRIP-off. **Positions in every other account are left
+/// untouched.** Returns the account's positions after the upsert.
+///
+/// # Errors
+/// `ServerFnError` (401) without a valid session; 400 on a malformed payload
+/// (bad ticker / shares / account_type); 500 on persistence failure.
+#[allow(clippy::unused_async)]
+#[server]
+pub async fn upload_account_positions(
+    input: AccountUploadDto,
+) -> Result<Vec<PositionDto>, ServerFnError> {
+    use crate::server_state::PortfolioState;
+    use crate::services::gate::require_authed_user;
+
+    let user = require_authed_user().await?;
+    let state = PortfolioState::extract().await?;
+
+    // Validate the account type + parse every uploaded holding through the domain
+    // newtypes at the boundary (ARCH-BOUNDARY-VALIDATION-1). A malformed payload
+    // is a typed 400 before any write.
+    let account_type =
+        account_type_from_string(&input.account_type).map_err(|e| ServerFnError::ServerError {
+            message: e,
+            code: 400,
+            details: None,
+        })?;
+    let uploaded = input
+        .positions
+        .iter()
+        .map(uploaded_dto_to_domain)
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(|e| ServerFnError::ServerError {
+            message: e,
+            code: 400,
+            details: None,
+        })?;
+
+    state
+        .position_source
+        .upsert_account(
+            user.id(),
+            &input.account_label,
+            account_type,
+            &uploaded,
+            chrono::Utc::now(),
+        )
+        .await
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // Return the freshly-reconciled positions (the whole portfolio; the UI groups
+    // by account). user_id-scoped (SPEC §9.1).
+    let positions = state
+        .position_source
+        .positions_for_user(user.id())
+        .await
+        .map_err(|e| internal_error(e.to_string()))?;
+    Ok(positions.iter().map(position_to_dto).collect())
+}
+
+/// Toggle a position's DRIP flag inline (`§2.7`, `BUDGET-AUTH-GATE-1`). A targeted
+/// single-column update that PERSISTS and SURVIVES uploads (it is per-position
+/// config, never a re-baseline). `user_id`-scoped (`SPEC §9.1`).
+///
+/// # Errors
+/// `ServerFnError` (401) without a valid session; 500 on persistence failure.
+#[allow(clippy::unused_async)]
+#[server]
+pub async fn set_drip_enabled(id: Uuid, enabled: bool) -> Result<(), ServerFnError> {
+    use budget_domain::ids::PositionId;
+
+    use crate::server_state::PortfolioState;
+    use crate::services::gate::require_authed_user;
+
+    let user = require_authed_user().await?;
+    let state = PortfolioState::extract().await?;
+
+    state
+        .position_source
+        .set_drip_enabled(user.id(), PositionId::new(id), enabled)
+        .await
+        .map_err(|e| internal_error(e.to_string()))?;
+    Ok(())
+}
+
 /// List the authenticated user's cash balances (`BUDGET-AUTH-GATE-1`).
 ///
 /// # Errors
@@ -1206,6 +1354,48 @@ mod tests {
         assert_eq!(dto.shares, "5");
         assert_eq!(dto.cost_basis, None);
         assert_eq!(dto.id, pos.id.value());
+        assert!(!dto.drip_enabled, "a freshly-added holding is DRIP-off");
+    }
+
+    // -- Phase 7.4: per-account upload upsert DTO parsing ---------------------
+
+    #[test]
+    fn uploaded_dto_to_domain_parses_ticker_shares_and_cost_basis() {
+        let input = UploadedPositionDto {
+            ticker: "aapl".to_owned(),
+            shares: "12.5".to_owned(),
+            cost_basis: Some("1800.00".to_owned()),
+        };
+        let domain = uploaded_dto_to_domain(&input).unwrap();
+        assert_eq!(domain.ticker.as_str(), "AAPL", "ticker normalised");
+        assert_eq!(domain.shares, rust_decimal::Decimal::new(125, 1));
+        assert_eq!(domain.cost_basis, Some(Money::from_minor(180_000)));
+    }
+
+    #[test]
+    fn uploaded_dto_blank_cost_basis_is_none() {
+        let input = UploadedPositionDto {
+            ticker: "MSFT".to_owned(),
+            shares: "3".to_owned(),
+            cost_basis: Some("  ".to_owned()),
+        };
+        assert_eq!(uploaded_dto_to_domain(&input).unwrap().cost_basis, None);
+    }
+
+    #[test]
+    fn uploaded_dto_rejects_bad_ticker_and_shares() {
+        let bad_ticker = UploadedPositionDto {
+            ticker: "A1B".to_owned(),
+            shares: "1".to_owned(),
+            cost_basis: None,
+        };
+        assert!(uploaded_dto_to_domain(&bad_ticker).is_err());
+        let bad_shares = UploadedPositionDto {
+            ticker: "AAPL".to_owned(),
+            shares: "nope".to_owned(),
+            cost_basis: None,
+        };
+        assert!(uploaded_dto_to_domain(&bad_shares).is_err());
     }
 
     #[test]
