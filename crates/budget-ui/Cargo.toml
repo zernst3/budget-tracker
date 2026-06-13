@@ -2,56 +2,104 @@
 #
 # Per RUST-DIOXUS-16 a Dioxus Fullstack web app is a SINGLE crate that compiles
 # to two targets — the native `server` target (SSR host + server-function
-# handlers) and the `web` wasm32 target (the hydrating client bundle) — sharing
-# one `App` component. Per-target code is gated by Cargo features (`server` /
-# `web`) so native-only dependencies (Axum, the DB drivers pulled in transitively
-# through the app-services/infrastructure crates) never enter the wasm32
-# dependency graph.
+# handlers + the `budget-server` entry binary) and the `web` wasm32 target (the
+# hydrating client bundle) — sharing one `App` component.
 #
-# The companion `budget-server` binary crate is the thin native entrypoint: it
-# depends on THIS crate with the `server` feature, mounts the Axum router that
-# serves the SSR HTML + the client bundle + the server-function endpoints
-# (RUST-DIOXUS-11), and additionally hosts the out-of-band admin CLIs
-# (provision-user / seed-onboarding). Keeping the `App` + the server functions
-# here, and the launch wiring there, satisfies the orchestrator's two-crate ask
-# while preserving the single shared `App` component the single-crate rule is
-# really about.
+# Per PORT-FULLSTACK-1 (rust-portfolio's working reference), per-target code is
+# gated by TARGET CFG (`cfg(not(target_arch = "wasm32"))` vs.
+# `cfg(target_arch = "wasm32")`), NOT a `server` Cargo feature. Server-only
+# dependencies (Axum, the Dioxus server runtime, the DB drivers pulled in
+# transitively through the app-services/infrastructure crates) live in
+# `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]` so Cargo excludes
+# them from the wasm32 dependency graph automatically. This is what lets a single
+# `dx serve` build BOTH the native server AND the wasm client from one crate — a
+# library crate could not build a web target, which was the prior showstopper.
+#
+# This crate also hosts the native `budget-server` entry binary and the
+# out-of-band admin CLIs (provision-user / seed-local-demo / seed-onboarding) as
+# additional `[[bin]]` targets; their server deps come from the not-wasm32 target
+# block, so they never touch the wasm graph.
 [package]
 name = "budget-ui"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Dioxus 0.7 fullstack app: App shell, router, views, and server functions calling the app-services layer (D1, RUST-DIOXUS-9/11/16)."
+description = "Dioxus 0.7 fullstack app: App shell, router, views, server functions, the native Axum host (budget-server), and the admin CLIs (D1, RUST-DIOXUS-9/11/16, PORT-FULLSTACK-1)."
 
 [lints]
 workspace = true
 
+# Dioxus 0.7 fullstack feature convention (dioxus-cli build/request.rs): a
+# `web = ["dioxus/web"]` renderer feature and a `server = ["dioxus/server"]`
+# server feature. `dx` auto-enables `web` for the wasm build and `server` for the
+# native server build, stripping default features in each case.
+#
+# The `server` feature here is a THIN MARKER — it only flips `dioxus/server` so
+# the `#[server]` macro's server-side bodies (which the macro gates on
+# `cfg(feature = "server")`) compile. It deliberately does NOT pull the heavy
+# server stack (Axum, app-services, infrastructure, the DB drivers): those live
+# in [target.'cfg(not(target_arch="wasm32"))'.dependencies] so Cargo excludes
+# them from the wasm32 graph automatically (PORT-FULLSTACK-1). This split is what
+# lets a single `dx serve` build BOTH the native server AND the wasm client from
+# one crate while keeping the wasm graph free of native-only deps.
+#
+# `default = ["server"]` so a plain `cargo build` / `cargo test` (native host
+# target) compiles + runs the server-side bodies. The wasm build strips it:
+# `dx build --platform web` / `cargo build --target wasm32 --no-default-features
+# --features web`.
 [features]
-default = []
-# The native SSR-host + server-function-handler target. Pulls the fullstack
-# server runtime and the server-side service/persistence stack. Enabled by the
-# `budget-server` binary crate.
-server = [
-    "dioxus/server",
-    "dep:budget-app-services",
-    "dep:budget-infrastructure",
-    "dep:sea-orm",
-    "dep:tower-sessions",
-    "dep:tokio",
-    "dep:tracing",
-    "dep:uuid",
-    "dep:chrono-tz",
-    "dep:async-trait",
-]
-# The wasm32 hydrating client bundle. `dx serve` / the deploy build selects this
-# for the browser target.
+default = ["server"]
+server = ["dioxus/server"]
 web = ["dioxus/web"]
+
+[lib]
+name = "budget_ui"
+path = "src/lib.rs"
+
+# The Dioxus fullstack server entrypoint (default bin). KEPT named `budget-server`
+# so deploy/Docker/CI keep resolving the same bin name, even though it now lives
+# in the budget-ui package (PORT-FULLSTACK-1, RUST-DIOXUS-16).
+[[bin]]
+name = "budget-server"
+path = "src/main.rs"
+
+# The out-of-band single-user seed (SPEC §9; BUDGET-AUTH-GATE-1). Native-only
+# admin CLI; `required-features = ["server"]` keeps it out of the wasm build
+# (`dx build --platform web` / `--no-default-features --features web`), where its
+# server deps (budget-infrastructure, anyhow, ...) are absent. Its deps come from
+# the not-wasm32 target block, which is present on every native build.
+[[bin]]
+name = "provision-user"
+path = "src/bin/provision_user.rs"
+required-features = ["server"]
+
+# The re-runnable initial-load seed (SPEC §4.6, §12 D8; BUDGET-CUTOVER-1).
+[[bin]]
+name = "seed-onboarding"
+path = "src/bin/seed_onboarding.rs"
+required-features = ["server"]
+
+# STAGE-1 local-testing seed: populates a LOCAL Postgres with a realistic demo
+# budget so every UI screen has content before the first Pull. Requires only
+# DATABASE_URL + SEED_EMAIL; NO Plaid credentials, NO Azure.
+[[bin]]
+name = "seed-local-demo"
+path = "src/bin/seed_local_demo.rs"
+required-features = ["server"]
+
+# The AuthedUser-gate integration test (server-side code). It runs on native
+# (not wasm32), so the server deps in the not-wasm32 target block are available
+# automatically — no required-features needed.
+[[test]]
+name = "auth_gate"
+path = "tests/auth_gate.rs"
 
 [dependencies]
 # Dioxus fullstack: the `macro`/`html`/`hooks`/`signals`/`router`/`fullstack`
-# features are target-agnostic; `server` and `web` are layered on by the
-# features above so the wasm graph stays free of the native server runtime.
+# features are target-agnostic and always compiled. The `server` feature is
+# layered on ONLY for native (see the not-wasm32 target block); `web` is layered
+# on by the `web` feature for the browser target.
 dioxus = { version = "0.7", default-features = false, features = [
     "macro",
     "html",
@@ -60,13 +108,18 @@ dioxus = { version = "0.7", default-features = false, features = [
     "document",
     "router",
     "fullstack",
+    # `launch` provides `dioxus::launch`, the wasm32 client entrypoint
+    # (`src/main.rs`'s `cfg(target_arch = "wasm32")` branch). `logger` installs the
+    # default tracing logger for the client. Both are in dioxus's own default
+    # feature set, dropped here by `default-features = false`, so they are added
+    # back explicitly (the rust-portfolio reference keeps dioxus's defaults; we
+    # opt in to just the ones we use).
+    "launch",
+    "logger",
 ] }
 
-# The chorale table library (Zach's own — dogfood). Now published to crates.io,
-# so the budget UI depends on the released standalone crates rather than the
-# `main` git branch + the local `.cargo/config.toml` [paths] override (the
-# former drift-#9 workaround, now removed). chorale-dioxus is a Dioxus 0.7
-# adapter, so the versions line up.
+# The chorale table library (Zach's own — dogfood). Published to crates.io
+# (0.2.1); chorale-dioxus is a Dioxus 0.7 adapter, so the versions line up.
 chorale-dioxus = "0.2.1"
 chorale-core = "0.2.1"
 
@@ -86,31 +139,6 @@ rust_decimal = { workspace = true }
 # server functions (ensure_current_month timestamp arg).
 chrono = { workspace = true }
 
-# Server-only: the use-case + persistence layers the server functions call
-# directly (RUST-DIOXUS-9). Gated `optional` so they are absent from the wasm
-# graph; only the `server` feature pulls them in.
-budget-app-services = { path = "../budget-app-services", optional = true }
-budget-infrastructure = { path = "../budget-infrastructure", optional = true }
-tokio = { workspace = true, optional = true }
-tracing = { workspace = true, optional = true }
-# Server-only: the DRIP pay-date price adapter in `server_state` implements the
-# app-services `PayDatePriceSource` port via `#[async_trait]` (P7.4 wire-in).
-async-trait = { workspace = true, optional = true }
-
-# Server-only: the SeaORM connection the server state is built from, and the
-# tower-sessions `Session` handle the gate + login/logout server functions use.
-# Both are gated behind the `server` feature so they stay out of the wasm graph;
-# tower-sessions is version-locked to the 0.14 the infrastructure crate's session
-# store + AuthedUser extractor resolve against.
-sea-orm = { workspace = true, optional = true }
-tower-sessions = { version = "0.14", optional = true }
-
-# Server-only: the triage server functions parse wire UUIDs into domain newtypes
-# and resolve the Plaid reconcile-window date in the home timezone (D2). Both stay
-# out of the wasm graph (the wasm uuid dep below is a separate target-cfg entry).
-uuid = { workspace = true, optional = true }
-chrono-tz = { version = "0.10", optional = true }
-
 # RUST-WASM-GETRANDOM-1: the dependency graph (uuid in budget-domain, ahash via
 # dioxus, etc.) transitively includes getrandom, whose wasm32 build fails to
 # compile unless its `wasm_js` Cargo feature is enabled. Declare it as a
@@ -124,14 +152,66 @@ uuid = { workspace = true, features = ["js"] }
 # Only used on wasm32 behind a `#[cfg(target_arch = "wasm32")]` block.
 web-sys = { version = "0.3", features = ["Navigator", "ServiceWorkerContainer", "Window"] }
 
-# Dev-deps for the server-side `AuthedUser`-gate integration test
-# (tests/auth_gate.rs, `#[cfg(feature = "server")]`). These drive the REAL gate
-# through a `FullstackContext` scope with an in-memory session + fake repos, so
-# no Postgres is needed. Versions are locked to the workspace / infrastructure
-# crate's resolutions (tower-sessions 0.14, axum 0.8, the sqlx-free memory-store).
-[dev-dependencies]
+# Server-only deps — Cargo excludes these for wasm32 automatically (PORT-FULLSTACK-1).
+# `dioxus = { features = ["server"] }` is merged here so the server feature is
+# added only on native (dioxus/server pulls in the fullstack server runtime,
+# tokio/mio, etc., which break wasm32 builds). These cover BOTH the server
+# functions' bodies AND the native entry binary + admin CLIs.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dioxus = { version = "0.7", default-features = false, features = ["server"] }
+
+# The use-case + persistence + domain layers the server functions and the admin
+# CLIs call directly (RUST-DIOXUS-9). On native only, so they stay out of the
+# wasm graph.
 budget-app-services = { path = "../budget-app-services" }
 budget-infrastructure = { path = "../budget-infrastructure" }
+
+# The Axum fullstack integration: `ServeConfig` + the `DioxusRouterExt` trait
+# (`serve_dioxus_application`) that wires the server-function endpoints + SSR +
+# static-asset serving onto an Axum router (RUST-DIOXUS-11). `dioxus-cli-config`
+# supplies the bind address the `dx` CLI injects. Version-locked to dioxus 0.7.9.
+dioxus-server = "0.7"
+dioxus-cli-config = "0.7"
+
+# The Axum host. Pinned to 0.8 to match the version dioxus-server + the AuthedUser
+# extractor (budget-infrastructure) resolve against.
+axum = "0.8"
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# The DRIP pay-date price adapter in `server_state` implements the app-services
+# `PayDatePriceSource` port via `#[async_trait]` (P7.4 wire-in).
+async-trait = { workspace = true }
+
+# The SeaORM connection the server state is built from, and the tower-sessions
+# `Session` handle the gate + login/logout server functions use. tower-sessions
+# is version-locked to the 0.14 the infrastructure crate's session store +
+# AuthedUser extractor resolve against.
+sea-orm = { workspace = true, features = [
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+    "macros",
+] }
+tower-sessions = { version = "0.14" }
+
+# The triage server functions parse wire UUIDs into domain newtypes and resolve
+# the Plaid reconcile-window date in the home timezone (D2).
+uuid = { workspace = true }
+chrono-tz = { version = "0.10" }
+
+# CLI edges (RUST-DOMAIN-4 reserves anyhow for application edges / binaries):
+# the native entry binary + the admin CLIs.
+anyhow = { workspace = true }
+
+# Dev-deps for the server-side `AuthedUser`-gate integration test
+# (tests/auth_gate.rs). These drive the REAL gate through a `FullstackContext`
+# scope with an in-memory session + fake repos, so no Postgres is needed. The
+# test runs on native, so it also sees the not-wasm32 target deps
+# (budget-app-services / budget-infrastructure) automatically. Versions are
+# locked to the workspace / infrastructure crate's resolutions (tower-sessions
+# 0.14, axum 0.8, the sqlx-free memory-store).
+[dev-dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }

@@ -1,11 +1,14 @@
 //! `budget-ui` — the Dioxus 0.7 fullstack application crate.
 //!
-//! This crate is the single shared `App` for both the native `server` target
+//! This crate is the single shared `App` for both the native server target
 //! (SSR host + server-function handlers) and the `web` wasm32 target (the
-//! hydrating client bundle), per `RUST-DIOXUS-16`. The `budget-server` binary
-//! crate mounts the Axum router that serves all three concerns from one process
-//! (`RUST-DIOXUS-11`); this crate owns the UI tree, the router, and the server
-//! functions.
+//! hydrating client bundle), per `RUST-DIOXUS-16` / `PORT-FULLSTACK-1`. The same
+//! crate ALSO produces the native `budget-server` entry binary (`src/main.rs`)
+//! that mounts the Axum router serving all three concerns from one process
+//! (`RUST-DIOXUS-11`), plus the admin CLIs. Per-target code is gated by
+//! `cfg(target_arch = "wasm32")` / `cfg(not(target_arch = "wasm32"))`, not a
+//! Cargo feature, so a single `dx serve` builds BOTH targets and the server-only
+//! deps stay out of the wasm graph.
 //!
 //! ## Organization (`RUST-DIOXUS-1`)
 //!
@@ -14,7 +17,9 @@
 //! - [`components`] — reusable primitives composed by views.
 //! - [`services`] — server-function wrappers (`RUST-DIOXUS-9`): the client-side
 //!   call and the server-side handler are generated from one definition; the
-//!   server body runs in the app-services layer (gated to the `server` feature).
+//!   server body runs in the app-services layer (the `#[server]` macro gates it
+//!   on `cfg(feature = "server")`; the heavy server deps it reaches live in the
+//!   not-wasm32 target block so the wasm graph stays clean, PORT-FULLSTACK-1).
 //!
 //! The central [`Route`] enum lives here at the crate root.
 //!
@@ -35,12 +40,22 @@ pub mod services;
 pub mod views;
 
 // The server-side application state (repositories + AuthService) the gated
-// server functions read. Server-only (`#[cfg(feature = "server")]`): it pulls
-// the app-services + infrastructure stack, which must never enter the wasm32
-// client graph (`RUST-DIOXUS-16`). The `budget-server` host builds it and mounts
-// it as an Axum `Extension` layer.
+// server functions read. Server-only (`#[cfg(feature = "server")]`, matching the
+// gating the `#[server]` macro emits): it pulls the app-services + infrastructure
+// stack, which must never enter the wasm32 client graph (`RUST-DIOXUS-16`). The
+// heavy deps it uses live in the not-wasm32 target block, so the wasm graph stays
+// clean regardless; the feature gate just strips the server bodies on the client.
+// The `budget-server` host builds it and mounts it as an Axum `Extension` layer.
 #[cfg(feature = "server")]
 pub mod server_state;
+
+// The native Axum host wiring (connections -> migrations -> state -> router).
+// Server-only (`#[cfg(feature = "server")]`): it pulls the Axum + Dioxus server
+// runtime + the persistence stack, none of which may enter the wasm32 client
+// graph. The `budget-server` entry binary (`src/main.rs`) calls
+// [`server::build_router`]; integration tests can too.
+#[cfg(feature = "server")]
+pub mod server;
 
 use dioxus::prelude::*;
 

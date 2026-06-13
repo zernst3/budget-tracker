@@ -1,29 +1,33 @@
-//! `budget-server` — the native Axum fullstack host for the `budget-ui` app.
+//! The native Axum host wiring for the `budget-ui` fullstack app.
+//!
+//! Server-only (`cfg(not(target_arch = "wasm32"))`, `PORT-FULLSTACK-1`). This
+//! module owns the one-shot startup sequence — DB connections -> migrations ->
+//! server state -> Axum router — and exposes it as [`build_router`]. The
+//! `budget-server` entry binary (`src/main.rs`) calls it, then binds + serves.
 //!
 //! One process serves three concerns (`RUST-DIOXUS-11`): it server-renders the
 //! initial HTML, serves the hydrating wasm client bundle + static assets, and
-//! mounts the server-function endpoints declared in `budget_ui::services`
+//! mounts the server-function endpoints declared in [`crate::services`]
 //! (`RUST-DIOXUS-9`). The router is built explicitly here so the server-function
-//! plumbing AND the auth gate's wiring are visible at the entrypoint.
+//! plumbing AND the auth gate's wiring are visible at one place.
 //!
 //! ## Auth wiring (`BUDGET-AUTH-GATE-1`, `SPEC §9.1`, Phase B1)
 //!
 //! Two layers are mounted around the Dioxus application so they apply to the
 //! server-function routes (the server functions extract from the request the
 //! layers populate):
-//!   1. the [`SessionManagerLayer`] over the **Postgres-backed** session store —
-//!      secure `HttpOnly` `SameSite=Strict` cookies that survive scale-to-zero
-//!      (`build_session_layer`); and
-//!   2. an [`Extension`] of [`AppState`](budget_ui::server_state::AppState) — the
-//!      user repository + `AuthService` that the [`require_authed_user`] gate and
-//!      the login server function read.
+//!   1. the [`SessionManagerLayer`](tower_sessions::SessionManagerLayer) over the
+//!      **Postgres-backed** session store — secure `HttpOnly` `SameSite=Strict`
+//!      cookies that survive scale-to-zero (`build_session_layer`); and
+//!   2. an [`Extension`] of [`AppState`](crate::server_state::AppState) — the
+//!      user repository + `AuthService` that the
+//!      [`require_authed_user`](crate::services::gate::require_authed_user) gate
+//!      and the login server function read.
 //!
-//! With those two layers present, `budget_ui::services::gate::require_authed_user`
-//! resolves the authenticated user (or 401s), and every data server function that
-//! calls it FIRST is gated by construction.
-//!
-//! The bind address is supplied by the `dx` CLI / the deploy environment via
-//! `dioxus-cli-config`, falling back to localhost for a bare `cargo run`.
+//! With those two layers present,
+//! `crate::services::gate::require_authed_user` resolves the authenticated user
+//! (or 401s), and every data server function that calls it FIRST is gated by
+//! construction.
 
 // The fullstack integration's documented surface uses fallible setup at the app
 // edge; anyhow is the binary-edge error type (RUST-DOMAIN-4).
@@ -36,23 +40,24 @@ use sea_orm::{ConnectOptions, Database};
 
 use budget_infrastructure::auth::{SessionLayerConfig, build_session_layer};
 use budget_infrastructure::run_pending_migrations;
-use budget_ui::server_state::{AppState, MonthViewState, PortfolioState, TriageState};
 
-// The entrypoint is a linear wiring sequence (connections -> migrations -> state
-// -> router -> serve); splitting it would scatter the one-shot startup wiring
-// across helpers without making it clearer.
+use crate::server_state::{AppState, MonthViewState, PortfolioState, TriageState};
+
+/// Build the fully wired Axum router for the budget fullstack app.
+///
+/// Runs the linear startup sequence (connections -> migrations -> state ->
+/// router): opens the Postgres pools, applies pending migrations, builds the
+/// session layer + server state (auth / month-view / triage / portfolio), and
+/// assembles the Axum router with the SSR + client-bundle + server-function
+/// routes (`RUST-DIOXUS-11`) and the auth layers mounted around them.
+///
+/// The caller (`src/main.rs`) binds the listener and serves this router.
+//
+// The wiring is a linear sequence (connections -> migrations -> state -> router);
+// splitting it would scatter the one-shot startup wiring across helpers without
+// making it clearer.
 #[allow(clippy::too_many_lines)]
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Non-verbose logging (SPEC §8: stay under the Log Analytics free tier). The
-    // RUST_LOG env var still overrides this default at runtime.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
+pub async fn build_router() -> anyhow::Result<axum::Router> {
     // The Neon/Postgres connection string is supplied out of band (never
     // committed). CI is expected red until the secret exists (SPEC §12).
     let database_url = std::env::var("DATABASE_URL")
@@ -259,17 +264,13 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // The bind address the `dx` CLI / Container Apps injects; localhost for a
-    // bare `cargo run`.
-    let address = dioxus_cli_config::fullstack_address_or_localhost();
-
     // Build the Axum router: SSR + static client bundle + server-function
     // endpoints (RUST-DIOXUS-11), then mount the auth layers AROUND it so they
-    // apply to the server-function routes too. `budget_ui::App` is the single
-    // shared root component (RUST-DIOXUS-16).
+    // apply to the server-function routes too. `crate::App` is the single shared
+    // root component (RUST-DIOXUS-16).
     //
-    // PWA static assets (manifest.json, service-worker.js, icons) are served
-    // from the `static/` directory via `tower_http::services::ServeDir`.
+    // PWA static assets (manifest.json, service-worker.js, app.css) are served as
+    // compiled-in static routes (the bytes are `include_str!`'d at build time).
     let config = ServeConfig::new();
     let router = axum::Router::new()
         // PWA manifest and service worker (Phase B3: installable PWA shell)
@@ -305,7 +306,7 @@ async fn main() -> anyhow::Result<()> {
             }),
         )
         // Dioxus fullstack app: SSR HTML + client bundle + server functions
-        .serve_dioxus_application(config, budget_ui::App)
+        .serve_dioxus_application(config, crate::App)
         // Layer order: session layer first (populates `Session` extension),
         // then state extensions. All three extensions are visible to server-
         // function handlers downstream.
@@ -320,14 +321,5 @@ async fn main() -> anyhow::Result<()> {
         None => router,
     };
 
-    let listener = tokio::net::TcpListener::bind(address)
-        .await
-        .with_context(|| format!("binding the server to {address}"))?;
-    tracing::info!(%address, "budget-server listening");
-
-    axum::serve(listener, router.into_make_service())
-        .await
-        .context("running the Axum server")?;
-
-    Ok(())
+    Ok(router)
 }
