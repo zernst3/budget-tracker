@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- A real <title> is REQUIRED: dioxus-server's index_html parser does a raw
+         split_once("<title>") to find the wasm-bundle <script> injection point
+         (dioxus-server-0.7.9/src/index_html.rs). Without it the client bundle is
+         never injected and the app ships SSR-only with no hydration. The app's
+         per-route document::Title overrides this at runtime. -->
+    <title>Budget Tracker</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- theme-color, manifest link, and the app.css stylesheet are provided by
+         the App's document:: elements (hoisted into this <head>), so they stay
+         out of this minimal shell. dx injects the wasm client <script> here. -->
+  </head>
+  <body>
+    <div id="main"></div>
+  </body>
+</html>
