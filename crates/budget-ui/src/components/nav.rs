@@ -67,6 +67,12 @@ pub fn NavBar(on_signout: EventHandler<()>) -> Element {
                     active_class: "active",
                     "Pending"
                 }
+                Link {
+                    to: Route::AccountView {},
+                    class: "nav-bar__link",
+                    active_class: "active",
+                    "Account"
+                }
                 button {
                     class: "nav-bar__signout",
                     r#type: "button",

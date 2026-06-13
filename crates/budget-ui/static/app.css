@@ -444,3 +444,219 @@ body {
 .day-detail {
   padding: 0.25rem 0 0.75rem 1.5rem;
 }
+
+/* ===== Auth: login screen ===================================================
+ * A centered card on a soft slate backdrop, matching the app palette
+ * (#1f2937 brand, slate text, 8px radii). Replaces the bare inline form. */
+.auth-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 22rem;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  box-shadow: 0 10px 30px -12px rgba(15, 23, 42, 0.25);
+  padding: 2rem 1.75rem;
+}
+
+.auth-card__brand {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-bottom: 0.25rem;
+}
+
+.auth-card__logo {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: #1f2937;
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 1.1rem;
+}
+
+.auth-card__title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #1a202c;
+}
+
+.auth-card__subtitle {
+  margin: 0.25rem 0 1.5rem;
+  font-size: 0.875rem;
+  color: #64748b;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.auth-field__label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #334155;
+}
+
+.auth-field__input {
+  width: 100%;
+  padding: 0.6rem 0.7rem;
+  font-size: 0.95rem;
+  color: #1a202c;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+
+.auth-field__input:focus {
+  outline: none;
+  border-color: #1f2937;
+  box-shadow: 0 0 0 3px rgba(31, 41, 55, 0.12);
+}
+
+.auth-btn {
+  width: 100%;
+  padding: 0.65rem 0.75rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, opacity 0.12s;
+}
+
+.auth-btn--primary {
+  margin-top: 0.25rem;
+  color: #ffffff;
+  background: #1f2937;
+  border: 1px solid #1f2937;
+}
+
+.auth-btn--primary:hover:not(:disabled) {
+  background: #111827;
+}
+
+.auth-btn--secondary {
+  color: #1f2937;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+}
+
+.auth-btn--secondary:hover:not(:disabled) {
+  background: #f1f5f9;
+}
+
+.auth-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 1.25rem 0;
+  color: #94a3b8;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: #e2e8f0;
+}
+
+.auth-error {
+  margin: 1rem 0 0;
+  padding: 0.6rem 0.75rem;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  color: #b91c1c;
+  font-size: 0.85rem;
+}
+
+/* ===== Account / security: TOTP enrollment ================================ */
+.account-card {
+  max-width: 30rem;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 1.5rem 1.5rem 1.75rem;
+}
+
+.account-card__title {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #1a202c;
+}
+
+.account-card__lead {
+  margin: 0 0 1.25rem;
+  font-size: 0.875rem;
+  color: #475569;
+  line-height: 1.5;
+}
+
+.account-qr {
+  display: flex;
+  justify-content: center;
+  padding: 1rem;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.account-qr svg {
+  width: 220px;
+  height: 220px;
+}
+
+.account-card__hint {
+  margin: 1.25rem 0 0.4rem;
+  font-size: 0.8rem;
+  color: #64748b;
+}
+
+.account-secret {
+  display: block;
+  padding: 0.6rem 0.75rem;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.95rem;
+  letter-spacing: 0.08em;
+  word-break: break-all;
+  color: #1a202c;
+}
+
+.account-card__error {
+  color: #b91c1c;
+  font-size: 0.9rem;
+}

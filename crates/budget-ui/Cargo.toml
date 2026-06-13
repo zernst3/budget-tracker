@@ -204,6 +204,12 @@ chrono-tz = { version = "0.10" }
 # the native entry binary + the admin CLIs.
 anyhow = { workspace = true }
 
+# QR rendering for the TOTP-enrollment screen: the `otpauth://` provisioning URI
+# is rendered to an inline SVG server-side (the `svg` feature only — NOT the
+# default `image` feature, which would pull the heavy `image` crate). Server-only
+# (not-wasm32), used inside a `#[server]` body.
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
 # Dev-deps for the server-side `AuthedUser`-gate integration test
 # (tests/auth_gate.rs). These drive the REAL gate through a `FullstackContext`
 # scope with an in-memory session + fake repos, so no Postgres is needed. The

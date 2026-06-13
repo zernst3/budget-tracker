@@ -22,5 +22,5 @@ pub use extractor::{AuthState, AuthedUser};
 pub use key_vault::AzureKeyVault;
 pub use password::Argon2idHasher;
 pub use session::{SessionLayerConfig, build_session_layer};
-pub use totp::Rfc6238TotpService;
+pub use totp::{BypassTotpService, Rfc6238TotpService};
 pub use webauthn::WebauthnService;

@@ -186,9 +186,25 @@ Open `http://localhost:8080` in your browser.
 1. Enter `zach@local.dev` and the password you set in `provision-user`.
 2. Enter the current TOTP code from your authenticator app.
 
+> **Skip the authenticator for local testing.** Export `TOTP_BYPASS=dev`
+> before `dx serve` and the second factor accepts ANY code (type any 6 digits,
+> or leave it). This mirrors the `AI_MODE=mock` / `PLAID_MODE=mock` switches: it
+> is reached ONLY by the exact `TOTP_BYPASS=dev` opt-in, logs a loud `WARN` at
+> startup, and must NEVER be set in production (where the second factor is
+> mandatory, `SPEC §9.1`). Leave it unset to exercise the real TOTP path.
+
 > Passkey (biometric) login requires a real HTTPS origin bound to `localhost`
 > with a physical authenticator device. It will not work in this local HTTP
 > setup. Password + TOTP is the correct local path.
+
+### Adding an authenticator device (the `/account` screen)
+
+Once signed in, the **Account** nav link opens `/account`, which renders your
+CURRENT TOTP second factor as a **scannable QR code** plus the Base32 secret for
+manual entry. Point your phone authenticator app at it to add a device — this
+displays the existing secret (it does not rotate it), so your other devices keep
+working. This is the production-safe way to enroll a new authenticator: the
+`otpauth://` URI is never put in a link or the URL, only rendered as a QR image.
 
 ---
 
@@ -320,6 +336,7 @@ Open `http://localhost:8080` in your browser.
 | `SESSION_SECRET` | Recommended | any 64+ hex chars |
 | `AI_MODE` | Yes (portfolio, offline) | `mock` — mock advisor + market data + dividend source + in-memory vault (zero network, no keys) |
 | `BUDGET_USER_EMAIL` | Yes (portfolio) | the provisioned user's email (e.g. `zach@local.dev`); without it the `/portfolio` routes are not mounted |
+| `TOTP_BYPASS` | Optional (local only) | `dev` — accept ANY TOTP code so you can sign in without an authenticator. Logs a loud `WARN`. NEVER set in production (`SPEC §9.1`). |
 
 Do NOT set `PLAID_CLIENT_ID`, `PLAID_SECRET`, or `KEY_VAULT_URL` for local
 testing. If any of those are present AND `PLAID_MODE=mock` is also set, the

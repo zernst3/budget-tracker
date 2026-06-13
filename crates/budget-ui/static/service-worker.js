@@ -104,10 +104,14 @@ self.addEventListener('fetch', (event) => {
     return event.respondWith(
       fetch(request)
         .then((response) => {
-          // Cache a successful response (even if stale later).
+          // Cache a successful response (even if stale later). Clone SYNCHRONOUSLY
+          // here — before `return response` lets the browser start consuming the
+          // body — then stash the copy once the cache opens. Cloning inside the
+          // async `.then` would race the body read ("Response body is already
+          // used").
           if (response.ok) {
-            const cache = caches.open(CACHE_NAME);
-            cache.then((c) => c.put(request, response.clone()));
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((c) => c.put(request, copy));
           }
           return response;
         })
@@ -126,10 +130,12 @@ self.addEventListener('fetch', (event) => {
         return cached;
       }
       return fetch(request).then((response) => {
-        // Cache successful responses for future offline access.
+        // Cache successful responses for future offline access. Clone
+        // SYNCHRONOUSLY before returning (see the HTML-shell handler above), or
+        // the body read races the clone ("Response body is already used").
         if (response.ok) {
-          const cache = caches.open(CACHE_NAME);
-          cache.then((c) => c.put(request, response.clone()));
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((c) => c.put(request, copy));
         }
         return response;
       });

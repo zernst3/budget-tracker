@@ -13,8 +13,10 @@
 //! Both establish the same server-side session and navigate to the budget view.
 //! On failure each shows a single opaque error (anti-enumeration: the server
 //! returns the same 401 for every credential failure / unknown account, so the UI
-//! cannot say which factor was wrong or whether the account exists). Visual polish
-//! is still minimal — `// TODO(frontend-phase)` marks it.
+//! cannot say which factor was wrong or whether the account exists). Styled via
+//! the `.auth-*` classes in `app.css` (centered card on a slate backdrop); the
+//! TOTP-enrollment QR flow lives on the authenticated `/account` screen
+//! ([`crate::views::AccountView`]).
 
 use dioxus::prelude::*;
 
@@ -26,8 +28,8 @@ use crate::services::{
 
 /// Login page.
 ///
-/// TODO(frontend-phase): styling + the TOTP-enroll QR flow. Manual QA required
-/// (checker-poor half) for the passkey path against a real authenticator.
+/// Manual QA required (checker-poor half) for the passkey path against a real
+/// authenticator.
 #[component]
 #[must_use]
 pub fn Login() -> Element {
@@ -104,61 +106,78 @@ pub fn Login() -> Element {
     };
 
     rsx! {
-        main { style: "font-family: sans-serif; max-width: 24rem; margin: 4rem auto; padding: 1rem;",
-            h1 { "Budget Tracker" }
-            p { "Sign in to continue." }
-            // method="post" is defense-in-depth: if the client bundle has not
-            // hydrated yet, a native submit must POST credentials in the body,
-            // never fall back to a GET that puts email/password/TOTP in the URL
-            // query string (where they leak into logs, history, and referers).
-            form { method: "post", onsubmit: on_submit,
-                label {
-                    "Email"
-                    input {
-                        r#type: "email",
-                        name: "email",
-                        autocomplete: "username",
-                        value: "{email}",
-                        oninput: move |e| email.set(e.value()),
+        main { class: "auth-page",
+            div { class: "auth-card",
+                div { class: "auth-card__brand",
+                    span { class: "auth-card__logo", "$" }
+                    h1 { class: "auth-card__title", "Budget Tracker" }
+                }
+                p { class: "auth-card__subtitle", "Sign in to continue." }
+
+                // method="post" is defense-in-depth: if the client bundle has not
+                // hydrated yet, a native submit must POST credentials in the body,
+                // never fall back to a GET that puts email/password/TOTP in the URL
+                // query string (where they leak into logs, history, and referers).
+                form { class: "auth-form", method: "post", onsubmit: on_submit,
+                    div { class: "auth-field",
+                        label { class: "auth-field__label", r#for: "login-email", "Email" }
+                        input {
+                            id: "login-email",
+                            class: "auth-field__input",
+                            r#type: "email",
+                            name: "email",
+                            autocomplete: "username",
+                            value: "{email}",
+                            oninput: move |e| email.set(e.value()),
+                        }
+                    }
+                    div { class: "auth-field",
+                        label { class: "auth-field__label", r#for: "login-password", "Password" }
+                        input {
+                            id: "login-password",
+                            class: "auth-field__input",
+                            r#type: "password",
+                            name: "password",
+                            autocomplete: "current-password",
+                            value: "{password}",
+                            oninput: move |e| password.set(e.value()),
+                        }
+                    }
+                    div { class: "auth-field",
+                        label { class: "auth-field__label", r#for: "login-totp", "Authenticator code" }
+                        input {
+                            id: "login-totp",
+                            class: "auth-field__input",
+                            r#type: "text",
+                            name: "totp",
+                            inputmode: "numeric",
+                            autocomplete: "one-time-code",
+                            value: "{totp_code}",
+                            oninput: move |e| totp_code.set(e.value()),
+                        }
+                    }
+                    button {
+                        class: "auth-btn auth-btn--primary",
+                        r#type: "submit",
+                        disabled: submitting(),
+                        if submitting() { "Signing in…" } else { "Sign in" }
                     }
                 }
-                label {
-                    "Password"
-                    input {
-                        r#type: "password",
-                        name: "password",
-                        autocomplete: "current-password",
-                        value: "{password}",
-                        oninput: move |e| password.set(e.value()),
-                    }
+
+                // Passkey (biometric) sign-in. Uses the email typed above to
+                // resolve the account; the OS handles the fingerprint / face prompt.
+                div { class: "auth-divider", "or" }
+                button {
+                    class: "auth-btn auth-btn--secondary",
+                    r#type: "button",
+                    disabled: submitting(),
+                    onclick: on_passkey,
+                    "Sign in with passkey"
                 }
-                label {
-                    "Authenticator code"
-                    input {
-                        r#type: "text",
-                        name: "totp",
-                        inputmode: "numeric",
-                        autocomplete: "one-time-code",
-                        value: "{totp_code}",
-                        oninput: move |e| totp_code.set(e.value()),
-                    }
+
+                if let Some(message) = error() {
+                    p { class: "auth-error", role: "alert", "{message}" }
                 }
-                button { r#type: "submit", disabled: submitting(),
-                    if submitting() { "Signing in…" } else { "Sign in" }
-                }
-            }
-            // Passkey (biometric) sign-in. Uses the email typed above to resolve
-            // the account; the OS handles the fingerprint / face prompt.
-            // TODO(frontend-phase): style the divider + button.
-            p { style: "margin-top: 1rem; color: #666;", "or" }
-            button {
-                r#type: "button",
-                disabled: submitting(),
-                onclick: on_passkey,
-                "Sign in with passkey"
-            }
-            if let Some(message) = error() {
-                p { style: "color: #b00020;", role: "alert", "{message}" }
             }
         }
     }

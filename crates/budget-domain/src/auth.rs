@@ -178,6 +178,17 @@ pub trait TotpService: Send + Sync {
     /// # Errors
     /// [`AuthError::Totp`] if `secret` cannot be decoded into a TOTP instance.
     fn verify(&self, secret: &str, code: &str) -> Result<bool, AuthError>;
+
+    /// Rebuild the `otpauth://` provisioning URI for an EXISTING Base32 `secret`
+    /// (without rotating it), so a logged-in user can re-display their current
+    /// second factor as a QR code and add it to an additional authenticator app /
+    /// device. Unlike [`enroll`](Self::enroll) this generates no new secret; it
+    /// reconstructs the URI for the secret already on the user record.
+    ///
+    /// # Errors
+    /// [`AuthError::Totp`] if `secret` cannot be decoded into a TOTP instance.
+    fn provisioning_uri(&self, secret: &str, account_label: &str)
+    -> Result<String, AuthError>;
 }
 
 /// Port: a secret vault (Azure Key Vault, `BUDGET-PLAID-TOKEN-VAULT-1`).

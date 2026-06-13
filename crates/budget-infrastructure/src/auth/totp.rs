@@ -73,6 +73,66 @@ impl TotpService for Rfc6238TotpService {
         totp.check_current(code)
             .map_err(|e| AuthError::Totp(e.to_string()))
     }
+
+    fn provisioning_uri(
+        &self,
+        secret: &str,
+        account_label: &str,
+    ) -> Result<String, AuthError> {
+        // Rebuild the same TOTP the secret already represents (issuer + the
+        // standard parameters) and emit its otpauth:// URI. No new secret is
+        // minted, so adding another authenticator device does not invalidate the
+        // existing ones.
+        Ok(Self::build(secret, account_label)?.get_url())
+    }
+}
+
+/// A LOCAL-DEVELOPMENT-ONLY [`TotpService`] that accepts ANY code as valid.
+///
+/// Reached **only** by the explicit `TOTP_BYPASS=dev` opt-in wired in
+/// `budget-ui`'s `server_state` (mirroring the `AI_MODE=mock` / `PLAID_MODE=mock`
+/// switches). It exists so a developer running locally can sign in without an
+/// enrolled authenticator app; it MUST NEVER be selected in production, where it
+/// would render the mandatory second factor inert (`SPEC §9.1`).
+///
+/// It delegates [`enroll`](TotpService::enroll) and
+/// [`provisioning_uri`](TotpService::provisioning_uri) to the real engine so the
+/// QR-enrollment screen still produces a genuine secret + URI (a developer can
+/// scan it to test the real flow); only [`verify`](TotpService::verify) is
+/// short-circuited to `Ok(true)`.
+#[derive(Debug, Default, Clone)]
+pub struct BypassTotpService {
+    inner: Rfc6238TotpService,
+}
+
+impl BypassTotpService {
+    /// Construct the bypass engine (wrapping the real engine for enroll/URI).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: Rfc6238TotpService::new(),
+        }
+    }
+}
+
+impl TotpService for BypassTotpService {
+    fn enroll(&self, account_label: &str) -> Result<TotpEnrollment, AuthError> {
+        self.inner.enroll(account_label)
+    }
+
+    fn verify(&self, _secret: &str, _code: &str) -> Result<bool, AuthError> {
+        // DEV BYPASS: every code is accepted. Never reachable in production
+        // (gated by the exact `TOTP_BYPASS=dev` opt-in at the application edge).
+        Ok(true)
+    }
+
+    fn provisioning_uri(
+        &self,
+        secret: &str,
+        account_label: &str,
+    ) -> Result<String, AuthError> {
+        self.inner.provisioning_uri(secret, account_label)
+    }
 }
 
 #[cfg(test)]
@@ -80,7 +140,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     #![allow(clippy::expect_used)]
 
-    use super::Rfc6238TotpService;
+    use super::{BypassTotpService, Rfc6238TotpService};
     use budget_domain::auth::{AuthError, TotpService};
     use totp_rs::{Algorithm, Secret, TOTP};
 
@@ -135,6 +195,39 @@ mod tests {
         let svc = Rfc6238TotpService::new();
         let enrollment = svc.enroll("zach@example.com").expect("enroll");
         assert_eq!(svc.verify(&enrollment.secret, "000000"), Ok(false));
+    }
+
+    #[test]
+    fn provisioning_uri_rebuilds_for_an_existing_secret_without_rotating() {
+        // Re-deriving the URI for a stored secret must yield the SAME secret
+        // embedded (no rotation) and a well-formed otpauth URI, so a user can add
+        // another authenticator device for their CURRENT second factor.
+        let svc = Rfc6238TotpService::new();
+        let enrollment = svc.enroll("zach@example.com").expect("enroll");
+        let uri = svc
+            .provisioning_uri(&enrollment.secret, "zach@example.com")
+            .expect("uri");
+        assert!(uri.starts_with("otpauth://totp/"));
+        assert!(
+            uri.contains(&format!("secret={}", enrollment.secret)),
+            "the re-derived URI must carry the unchanged secret, got: {uri}",
+        );
+    }
+
+    #[test]
+    fn bypass_accepts_any_code_but_still_enrolls_a_real_secret() {
+        // DEV BYPASS: verify is short-circuited to Ok(true) for any code, while
+        // enroll/provisioning_uri still delegate to the real engine (so the QR
+        // screen produces a genuine secret a developer can scan to test for real).
+        let bypass = BypassTotpService::new();
+        let enrollment = bypass.enroll("dev@example.com").expect("enroll");
+        assert!(enrollment.provisioning_uri.starts_with("otpauth://totp/"));
+        assert!(
+            Secret::Encoded(enrollment.secret.clone()).to_bytes().is_ok(),
+            "the bypass still mints a valid base32 secret",
+        );
+        assert_eq!(bypass.verify(&enrollment.secret, "000000"), Ok(true));
+        assert_eq!(bypass.verify("anything", "literally-anything"), Ok(true));
     }
 
     #[test]

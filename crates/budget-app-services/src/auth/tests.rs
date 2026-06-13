@@ -94,6 +94,9 @@ impl TotpService for FakeTotp {
     fn verify(&self, secret: &str, code: &str) -> Result<bool, AuthError> {
         Ok(secret == FAKE_SECRET && code == ACCEPTED_CODE)
     }
+    fn provisioning_uri(&self, secret: &str, _account_label: &str) -> Result<String, AuthError> {
+        Ok(format!("otpauth://totp/Budget?secret={secret}"))
+    }
 }
 
 /// An in-memory credential repo.

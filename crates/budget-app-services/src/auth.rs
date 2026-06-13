@@ -147,6 +147,41 @@ impl AuthService {
         Ok(enrollment)
     }
 
+    /// Re-derive the CURRENT second factor's provisioning URI (without rotating
+    /// the secret), so a signed-in user can display their existing TOTP as a QR
+    /// code and add it to an additional authenticator app / device.
+    ///
+    /// Unlike [`enroll_totp`](Self::enroll_totp) this mints no new secret and
+    /// persists nothing: it reads the secret already on the user record and
+    /// reconstructs its `otpauth://` URI. Adding another device therefore does not
+    /// invalidate the codes on existing devices.
+    ///
+    /// # Errors
+    /// - [`AuthError::InvalidCredentials`] if the user does not exist.
+    /// - [`AuthError::SecondFactorRequired`] if the user has no enrolled secret
+    ///   yet (call [`enroll_totp`](Self::enroll_totp) first).
+    /// - [`AuthError::Totp`] on a TOTP engine fault.
+    /// - [`AuthError::Repository`] on a persistence failure.
+    pub async fn current_totp_provisioning(
+        &self,
+        user_id: UserId,
+    ) -> Result<TotpEnrollment, AuthError> {
+        let user = self
+            .users
+            .find_by_id(user_id)
+            .await?
+            .ok_or(AuthError::InvalidCredentials)?;
+        let secret = user
+            .totp_secret
+            .clone()
+            .ok_or(AuthError::SecondFactorRequired)?;
+        let provisioning_uri = self.totp.provisioning_uri(&secret, user.email.as_str())?;
+        Ok(TotpEnrollment {
+            secret,
+            provisioning_uri,
+        })
+    }
+
     /// Hash a new password and persist it on the user record.
     ///
     /// Used by the provisioning path and any future password-change flow. There

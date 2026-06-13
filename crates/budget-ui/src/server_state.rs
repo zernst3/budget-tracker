@@ -32,7 +32,7 @@ use std::sync::Arc;
 use budget_app_services::AuthService;
 use budget_domain::repositories::UserRepository;
 use budget_domain::repositories::{BudgetRepository, MonthRepository, TransactionRepository};
-use budget_infrastructure::auth::{Argon2idHasher, Rfc6238TotpService};
+use budget_infrastructure::auth::{Argon2idHasher, BypassTotpService, Rfc6238TotpService};
 use budget_infrastructure::{
     PostgresBudgetRepository, PostgresMonthRepository, PostgresTransactionRepository,
     PostgresUserRepository, PostgresWebauthnCredentialRepository, WebauthnService,
@@ -113,7 +113,24 @@ impl AppState {
         let users: Arc<dyn UserRepository> = Arc::new(PostgresUserRepository::new(users_db));
         let credentials = Arc::new(PostgresWebauthnCredentialRepository::new(credentials_db));
         let passwords = Arc::new(Argon2idHasher::new());
-        let totp = Arc::new(Rfc6238TotpService::new());
+
+        // TOTP second factor. The real RFC-6238 engine by default; the dev bypass
+        // ONLY on the exact `TOTP_BYPASS=dev` opt-in (mirroring `AI_MODE=mock` /
+        // `PLAID_MODE=mock`). The bypass accepts any code so a developer can sign
+        // in locally without an enrolled authenticator; it must NEVER be set in
+        // production, where it would render the mandatory second factor inert.
+        let totp_bypass = std::env::var("TOTP_BYPASS").as_deref() == Ok("dev");
+        let totp: Arc<dyn budget_domain::auth::TotpService> = if totp_bypass {
+            tracing::warn!(
+                "TOTP_BYPASS=dev — TOTP verification is DISABLED (every code is \
+                 accepted). This is a LOCAL-TESTING path; it must NEVER be set in \
+                 production (SPEC §9.1: the second factor is mandatory)."
+            );
+            Arc::new(BypassTotpService::new())
+        } else {
+            Arc::new(Rfc6238TotpService::new())
+        };
+
         let auth = Arc::new(AuthService::new(
             users.clone(),
             credentials,

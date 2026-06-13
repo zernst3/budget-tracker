@@ -43,6 +43,16 @@ use budget_infrastructure::run_pending_migrations;
 
 use crate::server_state::{AppState, MonthViewState, PortfolioState, TriageState};
 
+/// Build an `image/png` response from compiled-in icon bytes (the PWA icons /
+/// favicon / install screenshot, served as static routes).
+fn png(bytes: &'static [u8]) -> axum::response::Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        bytes,
+    )
+        .into_response()
+}
+
 /// Build the fully wired Axum router for the budget fullstack app.
 ///
 /// Runs the linear startup sequence (connections -> migrations -> state ->
@@ -304,6 +314,38 @@ pub async fn build_router() -> anyhow::Result<axum::Router> {
                 )
                     .into_response()
             }),
+        )
+        // PWA icons + favicon + install screenshot (Phase B3). Compiled-in as
+        // static bytes so they are served identically in dev (`dx serve`) and the
+        // production `budget-server` host — the manifest references each of these
+        // paths, so a missing route is a console 404 + a broken install icon.
+        .route(
+            "/icons/icon-192x192.png",
+            get(|| async { png(include_bytes!("../static/icons/icon-192x192.png")) }),
+        )
+        .route(
+            "/icons/icon-512x512.png",
+            get(|| async { png(include_bytes!("../static/icons/icon-512x512.png")) }),
+        )
+        .route(
+            "/icons/maskable-icon-192x192.png",
+            get(|| async { png(include_bytes!("../static/icons/maskable-icon-192x192.png")) }),
+        )
+        .route(
+            "/icons/maskable-icon-512x512.png",
+            get(|| async { png(include_bytes!("../static/icons/maskable-icon-512x512.png")) }),
+        )
+        .route(
+            "/icons/screenshot-540x720.png",
+            get(|| async { png(include_bytes!("../static/icons/screenshot-540x720.png")) }),
+        )
+        .route(
+            "/icons/favicon-32x32.png",
+            get(|| async { png(include_bytes!("../static/icons/favicon-32x32.png")) }),
+        )
+        .route(
+            "/favicon.ico",
+            get(|| async { png(include_bytes!("../static/icons/favicon-32x32.png")) }),
         )
         // Dioxus fullstack app: SSR HTML + client bundle + server functions
         .serve_dioxus_application(config, crate::App)

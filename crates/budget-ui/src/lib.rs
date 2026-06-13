@@ -59,7 +59,7 @@ pub mod server;
 
 use dioxus::prelude::*;
 
-use views::{LedgerView, Login, PendingView, PortfolioReviewView};
+use views::{AccountView, LedgerView, Login, PendingView, PortfolioReviewView};
 
 /// The application route table.
 ///
@@ -86,6 +86,11 @@ pub enum Route {
     /// land in later phases.
     #[route("/portfolio")]
     PortfolioReviewView {},
+    /// The authenticated account & security screen (`SPEC §9.1`): displays the
+    /// current TOTP second factor as a QR code so the user can add another
+    /// authenticator device.
+    #[route("/account")]
+    AccountView {},
 }
 
 /// The root application component, shared by the server (SSR) and web (hydrate)
@@ -125,10 +130,17 @@ pub fn App() -> Element {
         // Document head metadata for the PWA (manifest link, theme color, icons).
         // These render in the HTML <head> on SSR and are preserved on hydration.
         document::Link { rel: "manifest", href: "/manifest.json" }
+        // Favicon + iOS home-screen icon (served as compiled-in static routes).
+        document::Link { rel: "icon", r#type: "image/png", href: "/icons/favicon-32x32.png" }
+        document::Link { rel: "apple-touch-icon", href: "/icons/icon-192x192.png" }
         // Global stylesheet (FE3): consistent spacing, nav, currency, group-header.
         // Served by the Axum host as a compiled-in static route (/app.css).
         document::Link { rel: "stylesheet", href: "/app.css" }
         document::Meta { name: "theme-color", content: "#1f2937" }
+        // The standard installability hint (the modern replacement for the
+        // deprecated `apple-mobile-web-app-capable`, which is kept alongside it
+        // only for older iOS Safari).
+        document::Meta { name: "mobile-web-app-capable", content: "yes" }
         document::Meta { name: "apple-mobile-web-app-capable", content: "yes" }
         document::Meta { name: "apple-mobile-web-app-status-bar-style", content: "default" }
         document::Meta { name: "apple-mobile-web-app-title", content: "Budget" }

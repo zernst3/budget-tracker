@@ -14,6 +14,7 @@
 //!
 //! Phase B4 adds the `ensure_month` lazy-init server function.
 
+pub mod account;
 pub mod auth;
 mod health;
 pub mod ledger;
@@ -29,6 +30,7 @@ pub mod triage;
 #[cfg(feature = "server")]
 pub mod gate;
 
+pub use account::{TotpEnrollmentDto, totp_enrollment};
 pub use auth::{LoginRequest, current_user, login, logout};
 pub use health::health;
 pub use ledger::{
