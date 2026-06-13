@@ -141,15 +141,22 @@ The seed is re-runnable: a second run upserts to identical state.
 ## Step 6 — Start the app
 
 ```bash
-dx serve --bin budget-server
+dx serve --platform web --package budget-ui --bin budget-server --port 8088
 ```
 
 This is the unified-crate fullstack command (PORT-FULLSTACK-1): `budget-ui` is
 ONE crate that builds both the native server bin `budget-server` AND the wasm
-client, so `dx serve` compiles both targets and the app HYDRATES (it is
-interactive, not SSR-only). The old `dx serve --package budget-ui` errored
-("trying to build dioxus in a library crate") because `budget-ui` used to be a
-library plus a separate `budget-server` binary crate; that split is gone.
+client, so `dx serve` compiles both targets and the app HYDRATES (interactive,
+not SSR-only). All three flags matter:
+- `--platform web` forces the wasm CLIENT build (without it, dx builds only the
+  native server and the page never loads the wasm — SSR-only, no hydration).
+- `--package budget-ui --bin budget-server` is required because the crate has
+  four bins (the server + three admin CLIs), so dx cannot auto-pick the app bin
+  and otherwise errors "trying to build dioxus in a library crate".
+- `--port` is optional (default 8080); use any free port.
+
+The crate-root `index.html` template is what dx injects the client `<script>`
+into — without it the page would render SSR-only with no hydration.
 
 Or, if you prefer a plain cargo run, the native server bin alone (SSR only — no
 client bundle, so no hydration; use `dx serve` for an interactive client):
