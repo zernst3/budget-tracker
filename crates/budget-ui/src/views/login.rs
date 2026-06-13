@@ -107,7 +107,11 @@ pub fn Login() -> Element {
         main { style: "font-family: sans-serif; max-width: 24rem; margin: 4rem auto; padding: 1rem;",
             h1 { "Budget Tracker" }
             p { "Sign in to continue." }
-            form { onsubmit: on_submit,
+            // method="post" is defense-in-depth: if the client bundle has not
+            // hydrated yet, a native submit must POST credentials in the body,
+            // never fall back to a GET that puts email/password/TOTP in the URL
+            // query string (where they leak into logs, history, and referers).
+            form { method: "post", onsubmit: on_submit,
                 label {
                     "Email"
                     input {
