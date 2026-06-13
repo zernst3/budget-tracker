@@ -62,12 +62,13 @@ dioxus = { version = "0.7", default-features = false, features = [
     "fullstack",
 ] }
 
-# The chorale table library (Zach's own — dogfood). Git dependency pinned to the
-# `main` branch per SPEC §7 / §12 until v0.2.0 publishes to crates.io, at which
-# point this swaps to `chorale-dioxus = "0.2.0"`. chorale-dioxus is itself a
-# Dioxus 0.7 adapter, so the versions line up.
-chorale-dioxus = { git = "https://github.com/zernst3/rust-chorale", branch = "main" }
-chorale-core = { git = "https://github.com/zernst3/rust-chorale", branch = "main" }
+# The chorale table library (Zach's own — dogfood). Now published to crates.io,
+# so the budget UI depends on the released standalone crates rather than the
+# `main` git branch + the local `.cargo/config.toml` [paths] override (the
+# former drift-#9 workaround, now removed). chorale-dioxus is a Dioxus 0.7
+# adapter, so the versions line up.
+chorale-dioxus = "0.2.1"
+chorale-core = "0.2.1"
 
 # The domain crate is WASM-clean (no SeaORM/Axum), so it is safe on BOTH targets:
 # server functions return domain-shaped DTOs and the client renders them. Money
