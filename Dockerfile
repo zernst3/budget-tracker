@@ -1,10 +1,18 @@
 # Multi-stage build for the budget-tracker monolith.
 #
-# The server binary (Axum + Dioxus server functions) lands in the frontend
-# phase under crates/budget-server; this Dockerfile is the deploy spine for it
-# (CI builds + pushes this image to GHCR, then Container Apps pulls it).
-# Until that binary exists, the build stage compiles the workspace as a
-# smoke check; the runtime stage is ready for the binary once it lands.
+# The Dioxus fullstack app is ONE crate (crates/budget-ui, PORT-FULLSTACK-1):
+# it produces the native server binary `budget-server` (Axum + Dioxus server
+# functions + SSR host) AND the wasm client bundle. This Dockerfile is the
+# deploy spine for it (CI builds + pushes this image to GHCR, then Container
+# Apps pulls it).
+#
+# NOTE: a full fullstack image must build BOTH the server bin and the wasm
+# client assets. The canonical tool is `dx bundle --platform web --release`
+# (the dioxus CLI), which emits the server bin + the public/ client bundle the
+# server serves. The plain `cargo build` below compiles the server bin only
+# (smoke check); switching the build to `dx bundle` + copying its output is the
+# remaining deploy-phase step. The `--bin budget-server` artifact path below is
+# already correct (the bin lives in the budget-ui package).
 
 # ---- build stage ------------------------------------------------------------
 FROM rust:1.95-slim-bookworm AS builder
@@ -17,9 +25,11 @@ RUN apt-get update \
 
 COPY . .
 
-# Build the whole workspace in release. Once crates/budget-server exists,
-# narrow this to `--bin budget-server` and copy that artifact below.
-RUN cargo build --release --workspace
+# Build the workspace in release (smoke check). For the real deploy image,
+# replace this with `dx bundle --platform web --release` so the wasm client
+# bundle is built alongside the `budget-server` bin (which lives in the
+# budget-ui package).
+RUN cargo build --release --bin budget-server
 
 # ---- runtime stage ----------------------------------------------------------
 FROM debian:bookworm-slim AS runtime

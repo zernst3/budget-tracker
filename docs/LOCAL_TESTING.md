@@ -70,7 +70,7 @@ Migrations are applied automatically by every seed bin and by the server at
 startup, but you can run them manually to verify the schema:
 
 ```bash
-cargo run -p budget-server --bin seed-local-demo --
+cargo run -p budget-ui --bin seed-local-demo --
 # (seed-local-demo runs migrations as its first step; see Step 5)
 ```
 
@@ -89,7 +89,7 @@ DATABASE_URL="postgres://budget:localpass@localhost:5432/budget_local" \
 PROVISION_EMAIL="zach@local.dev" \
 PROVISION_PASSWORD="supersecret-local-12" \
 PROVISION_TRACKING_START="$(date +%Y-%m-01)" \
-cargo run -p budget-server --bin provision-user
+cargo run -p budget-ui --bin provision-user
 ```
 
 The command prints something like:
@@ -118,7 +118,7 @@ Re-running `provision-user` with the same email resets the password and TOTP
 ```bash
 DATABASE_URL="postgres://budget:localpass@localhost:5432/budget_local" \
 SEED_EMAIL="zach@local.dev" \
-cargo run -p budget-server --bin seed-local-demo
+cargo run -p budget-ui --bin seed-local-demo
 ```
 
 This creates (all idempotent):
@@ -141,13 +141,21 @@ The seed is re-runnable: a second run upserts to identical state.
 ## Step 6 — Start the app
 
 ```bash
-dx serve --package budget-ui
+dx serve --bin budget-server
 ```
 
-Or, if you prefer a plain cargo run (same binary, different entry):
+This is the unified-crate fullstack command (PORT-FULLSTACK-1): `budget-ui` is
+ONE crate that builds both the native server bin `budget-server` AND the wasm
+client, so `dx serve` compiles both targets and the app HYDRATES (it is
+interactive, not SSR-only). The old `dx serve --package budget-ui` errored
+("trying to build dioxus in a library crate") because `budget-ui` used to be a
+library plus a separate `budget-server` binary crate; that split is gone.
+
+Or, if you prefer a plain cargo run, the native server bin alone (SSR only — no
+client bundle, so no hydration; use `dx serve` for an interactive client):
 
 ```bash
-cargo run -p budget-server
+cargo run -p budget-ui --bin budget-server
 ```
 
 The server binds to `http://localhost:8080` by default (the `dx serve` port).
@@ -377,7 +385,7 @@ export BUDGET_USER_EMAIL=zach@local.dev # MUST match the provision-user email, o
 > takes precedence and logs a loud WARN at startup. (Those are only for the
 > live smoke test in Stage 3.)
 
-Restart the server (`dx serve --package budget-ui` or `cargo run -p budget-server`),
+Restart the server (`dx serve --bin budget-server` or `cargo run -p budget-ui --bin budget-server`),
 log in (Stage-1 Step 7), and open `http://localhost:8080/portfolio`.
 
 ## Step P2 — Per-account upload (the upsert is the source of truth)
